@@ -45,6 +45,7 @@ space.json                         the MCP server program
 logs/arun/2026-11-12.jsonl         config: my name, path to my repo clone
 logs/krish/2026-11-12.jsonl        index.sqlite (keyword + vector search)
 .gitignore                         embedding model files
+.gitattributes (LF line endings)
                                    read cursors (what I have already seen)
                                    queue of unpushed commits
 ```
@@ -56,7 +57,7 @@ logs/krish/2026-11-12.jsonl        index.sqlite (keyword + vector search)
 | If deleted | Shared history is gone; GitHub history is the backup | Nothing is lost; rebuild from the repo |
 | Format | JSON Lines: one JSON object per line, UTF-8 | Implementer's choice |
 
-MUST: the index, embeddings, and any other derived file are never committed. `.gitignore` allows only `logs/` and `space.json`.
+MUST: the index, embeddings, and any other derived file are never committed. `.gitignore` allows only `logs/`, `space.json`, `.gitignore` and `.gitattributes`. `.gitattributes` forces LF line endings (`*.jsonl text eol=lf`, `space.json text eol=lf`) so logs are byte-identical on every OS.
 
 `space.json` lists members and display names. It is written once at setup and changes rarely.
 
@@ -68,7 +69,8 @@ MUST:
 
 - One file per author per day: `logs/<author>/YYYY-MM-DD.jsonl` (UTC date).
 - Every event has a globally unique, roughly time-sortable `id` (a ULID or UUIDv7), plus `v` (schema version), `author`, `ts` (UTC, ISO 8601) and `kind`.
-- Readers tolerate a truncated or malformed last line: skip it, don't crash.
+- Readers tolerate a truncated or malformed last line: skip it, don't crash. (Implementation: any malformed line is skipped and counted, and writers start a fresh line if the file doesn't end in `\n`.)
+- `author` is a lowercase slug: `^[a-z0-9][a-z0-9_-]{0,31}$`.
 - Ingest is idempotent by `id`. Seeing the same event twice changes nothing.
 
 Event kinds:
@@ -76,7 +78,7 @@ Event kinds:
 | `kind` | What it records | Key fields |
 | --- | --- | --- |
 | `message` | A human's message, verbatim | `text` |
-| `status` | A person marking something decided, closed, reopened, or superseded | `target` (an event id), `status`, `reason` |
+| `status` | A person marking something decided, closed, reopened, or superseded | `target` (an event id), `status` (one of `decided`, `closed`, `reopened`, `superseded`), `reason` |
 | `note` | Something a person explicitly asked to add to the shared memory | `text` |
 | `assistant_note` | An optional short summary of a Claude reply, clearly marked as model-written | `text`, `about` (event id) |
 | `import` | A message brought in from an older chat (see Importing an existing chat) | `text`, `original_ts` if known, `role` |
@@ -169,7 +171,7 @@ Setup should take a few minutes for someone who already uses git.
 1. One person creates a private GitHub repo and adds the others as collaborators.
 2. Each person clones it to their machine.
 3. Each person installs the `.mcpb` in Claude Desktop. The install dialog asks for two settings: their name (their folder under `logs/`) and the path to their clone. MCPB bundles support user-supplied configuration ([MCPB repo](https://github.com/modelcontextprotocol/mcpb)).
-4. On first run, the server creates `logs/<name>/`, `.gitignore`, and `space.json` if missing, then builds the index.
+4. On first run, the server creates `logs/<name>/`, `.gitignore`, `.gitattributes`, and `space.json` if missing, then builds the index. It warns if the clone is inside a file-sync folder such as OneDrive, Dropbox, or iCloud Drive, because those can corrupt `.git`.
 5. Each person creates a Claude Desktop Project and pastes the Behaviour rules template into its instructions.
 
 During development (before M4), register the server manually in Claude Desktop's config file instead of using the bundle.
@@ -216,10 +218,10 @@ Build in this order. Each milestone ends with its tests passing and a commit. Te
 
 ## Open questions for the implementing session to raise
 
-- [ ] Python or TypeScript, given bundle size and embedding-model options?
-- [ ] Which local embedding model, and how big is the resulting bundle?
-- [ ] Should Claude's replies be logged as `assistant_note` by default, or not at all?
-- [ ] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)?
+- [x] Python or TypeScript, given bundle size and embedding-model options? **TypeScript** (see DECISIONS.md).
+- [ ] Which local embedding model, and how big is the resulting bundle? (Leading candidate: model2vec `potion-base-8M`; decide at M2b.)
+- [x] Should Claude's replies be logged as `assistant_note` by default, or not at all? **Off by default.**
+- [ ] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)? (Measure in M3; pull timeout is 3 s for now.)
 
 ## References
 

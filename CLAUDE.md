@@ -36,11 +36,14 @@ retrieval. Store what was said; interpret at read time; always show the source.
 
 ## Commands
 
-<!-- Fill in once the language is chosen. -->
-- Install deps: `TODO`
-- Test: `TODO`
-- Lint/typecheck: `TODO`
-- Run server (stdio): `TODO`
+TypeScript on Node (see DECISIONS.md). Scripts are created with `package.json` in M0.
+- Install deps: `npm ci`
+- Test: `npm test` (vitest; offline)
+- Typecheck: `npm run typecheck` (tsc --noEmit)
+- Build: `npm run build` (esbuild → single JS file)
+- Run server (stdio): `node dist/server.js` (from M3)
+
+Approved M0/M1 plan: docs/plan-m0-m1.md.
 
 ## Review
 
