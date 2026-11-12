@@ -4,3 +4,8 @@ export * from "./events/paths";
 export * from "./events/writer";
 export * from "./events/reader";
 export * from "./events/store";
+export * from "./transport/types";
+export * from "./transport/gitcli";
+export * from "./transport/git";
+export * from "./transport/shared";
+export * from "./transport/state";
