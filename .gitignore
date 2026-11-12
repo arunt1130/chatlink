@@ -1,0 +1,53 @@
+# --- chatlink derived/local data (never commit) ---
+*.sqlite
+*.sqlite3
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+models/
+*.onnx
+*.gguf
+*.safetensors
+.chatlink/
+*.mcpb
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+.venv/
+venv/
+.python-version
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+.tox/
+
+# --- TypeScript / Node ---
+node_modules/
+*.tsbuildinfo
+coverage/
+.npm/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# --- Editors / OS ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# --- Env / secrets ---
+.env
+.env.*
+
+# --- Claude Code local settings ---
+.claude/settings.local.json
