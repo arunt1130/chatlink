@@ -115,3 +115,33 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - (4) `chatlink search` is a small debugging subcommand next to `rebuild`. It reads the local index only and doesn't sync. The build now emits `dist/chatlink.js` (library) and `dist/cli.js`, with `better-sqlite3` external (a native module can't be bundled).
 - **Known, accepted differences:** Rebuild reads every log file at HEAD plus working-tree lines, while incremental ingest only sees files changed in commits. They can differ only if someone deletes a log file (which breaks append-only; incremental keeps those events), or for my lines that are on disk but not yet committed (the next recovery commit brings incremental level). Rebuilding while the index is open elsewhere fails on Windows (EBUSY). The M3 server should rebuild through its own open index (`reset()` + sync) rather than deleting the file.
 - **Reason:** The review found that a mistyped `--index` could delete a log, and the recovery commit would then commit and push that deletion. Checking a path before deleting it is the only safe order.
+
+### 2026-11-12 — M2b embedding model: model2vec potion-base-32M, pure JS
+- **Decision:** Use `minishlab/potion-base-32M` (MIT; 63,091 × 512 float32; 129 MB), pinned to revision `1e5a03f8…` and checked by size and hash in `scripts/fetch-model.mjs`. The files go in gitignored `models/potion-base-32M/`. Inference is ours, in about 150 lines with no dependency: a BERT WordPiece tokenizer read from `tokenizer.json`, row lookup, mean pool, L2-normalize. This mirrors model2vec's `StaticModel.encode`: no special tokens, `[UNK]` dropped, at most 512 tokens. The embedder id includes the revision, and a change re-embeds the index.
+- **Alternatives considered:** potion-base-8M (~30 MB); transformers.js with quantized MiniLM (needs onnxruntime-node, a heavy native dependency).
+- **Reason:** Arun picked the bigger model for paraphrase quality over bundle size. Static embeddings need no runtime: loading takes ~0.1 s and embedding runs at ~60k texts/s on this machine. A probe set had the right top-1 match for 6/6 paraphrases. Tests never download anything: a missing model fails loudly, so the acceptance test can't silently skip.
+
+### 2026-11-12 — M2b vector storage: BLOBs + exact scan, no sqlite-vec
+- **Decision:** Vectors are float32 BLOBs in a `vectors` table keyed by event rowid, inside the same SQLite file. A query scans all vectors that pass the author/since filters and takes dot products in JS. SPEC.md updated.
+- **Alternatives considered:** `sqlite-vec` (as SPEC suggested).
+- **Reason:** At this scale (thousands to tens of thousands of messages), an exact scan takes milliseconds and is exactly reproducible. That keeps "rebuild equals incremental" easy to prove. sqlite-vec is pre-v1 and would be a second native binary with the same platform/ABI packaging risk as better-sqlite3. It can be added later behind the same `search` without changing the logs.
+
+### 2026-11-12 — M2b hybrid ranking
+- **Decision:** `score = (0.5·keyword + 0.5·vector) × recency × tierBoost × statusBoost`, with all knobs in `src/search/ranking.ts`.
+  - The keyword score is absolute, not relative to the best hit: the idf-weighted share of query terms the item contains, × (0.5 + 0.5·bm25/best bm25).
+  - Common English stopwords are dropped from the keyword part of the query (unless nothing else is left). The vector part always sees the whole query.
+  - Vector similarity below 0.25 counts as no match.
+  - `tierBoost`: confirmed 1.25, said 1, imported 0.9, model-written 0.75. `statusBoost` applies to an item whose latest status is decided/closed (1.25), superseded (1.1) or reopened (1).
+  - Candidates are the top 200 by bm25 plus the top 200 by similarity, merged by id. Ties go to the newer `ts`, then the higher `id`.
+  - Every event with text is embedded at ingest, status reasons included. Events that lack a vector (ingested without an embedder, or after a model change) are embedded on open.
+  - Each hit reports `match: {keyword, vector}`.
+- **Alternatives considered:** Normalizing bm25 by the best hit (M2a's first version); reciprocal rank fusion.
+- **Reason:** With per-query normalization, a hit on a filler word like "the" scored a perfect 1.0 and drowned out a strong vector match, which a test caught. An absolute, idf-weighted keyword score keeps the two parts on one scale. Multiplying in recency and boosts keeps M2a's guarantee (newer outranks older equal match) and SPEC's "boost confirmed items". An item someone marked decided or closed counts as confirmed too.
+
+### 2026-11-12 — M2b notes after spec review (supersedes item 4 of "M2a index design")
+- **Decision:**
+  - (1) Final scoring now happens in JS over a merged candidate set: the top 200 by raw bm25 plus the top 200 by vector similarity. It no longer happens in SQL. So LIMIT no longer applies to the final score: when a term appears in more than 200 items, a recent or confirmed item just below the bm25 cut can be missed by keyword (vector search can still bring it in). This is accepted for v1, and `candidatePool` can be tuned.
+  - (2) Measured on this machine (Windows, Node 22, synthetic worst case where every message shares common words): ingest with embedding runs at ~8k events/s. Hybrid search averages 12 ms at 1k events, 118 ms at 10k and 234 ms at 20k, growing linearly with the vector scan and term coverage. That fits inside the ~2 s `sync_turn` target. If it doesn't hold up in M3/M5, keep the vectors in memory or add sqlite-vec.
+  - (3) Known limits: an embedder's id comes from `SOURCE.json` (written by `fetch-model` only after every hash check passes). Vectors are stored in native byte order: they are local, derived data, never shared. A model change re-embeds the whole index synchronously on open, which takes about 1 s per 8k events.
+  - (4) better-sqlite3 no longer needs to load extensions (sqlite-vec isn't used). It stays because FTS5 is the deciding reason.
+- **Reason:** Spec-review follow-ups. These are recorded so M3 can measure them against real use.

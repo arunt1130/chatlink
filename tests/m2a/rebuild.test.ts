@@ -104,7 +104,7 @@ describe("M2a rebuild equals incremental ingest", { timeout: 120_000 }, () => {
     const orig = console.log;
     console.log = (x: string) => logs.push(x);
     try {
-      const code = await main(["rebuild", "--repo", s.clone("arun"), "--me", "arun", "--state", s.stateDir("arun")], { env: s.env });
+      const code = await main(["rebuild", "--repo", s.clone("arun"), "--me", "arun", "--state", s.stateDir("arun"), "--no-model"], { env: s.env });
       expect(code).toBe(0);
     } finally {
       console.log = orig;

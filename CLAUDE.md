@@ -38,7 +38,8 @@ retrieval. Store what was said; interpret at read time; always show the source.
 
 TypeScript on Node (see DECISIONS.md). Scripts are created with `package.json` in M0.
 - Install deps: `npm ci`
-- Test: `npm test` (vitest; offline)
+- Fetch the embedding model once (network; ~130 MB into gitignored `models/`): `npm run fetch-model`
+- Test: `npm test` (vitest; offline; M2b tests need the model fetched and fail loudly without it)
 - Typecheck: `npm run typecheck` (tsc --noEmit)
 - Build: `npm run build` (esbuild → `dist/chatlink.js` library + `dist/cli.js`; `better-sqlite3` stays external)
 - Rebuild index: `node dist/cli.js rebuild --repo <clone> --me <name> --state <dir>` (from M2a)

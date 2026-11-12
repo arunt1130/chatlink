@@ -119,7 +119,7 @@ Report sync state in every `sync_turn` result: time of the last successful pull,
 A single local SQLite file holds keyword search, vector search, and ingest bookkeeping. It is fully derived from the logs.
 
 - **Keyword search:** SQLite's built-in full-text search (FTS5).
-- **Vector search:** embeddings from a small local embedding model, stored with a SQLite vector extension such as `sqlite-vec` ([repo](https://github.com/asg017/sqlite-vec); note it is pre-v1). No embedding API.
+- **Vector search:** embeddings from a small local embedding model, stored in the same SQLite file. No embedding API. (Decided at M2b: vectors are plain BLOBs searched by an exact scan in JS; a vector extension such as `sqlite-vec` ([repo](https://github.com/asg017/sqlite-vec), pre-v1) can be added if the corpus outgrows that. See DECISIONS.md.)
 - **Incremental ingest:** after each pull, ingest only new events.
 - **Rebuild:** a command that deletes the index and rebuilds it from the logs. Its result must match incremental ingest.
 - **Ranking:** combine keyword and vector scores, weight by recency, and boost confirmed items. Exact weights are the implementer's call; make them tunable in one place.
@@ -219,7 +219,7 @@ Build in this order. Each milestone ends with its tests passing and a commit. Te
 ## Open questions for the implementing session to raise
 
 - [x] Python or TypeScript, given bundle size and embedding-model options? **TypeScript** (see DECISIONS.md).
-- [ ] Which local embedding model, and how big is the resulting bundle? (Leading candidate: model2vec `potion-base-8M`; decide at M2b.)
+- [x] Which local embedding model, and how big is the resulting bundle? **model2vec `potion-base-32M`** (MIT, 129 MB, 512-dim), run in pure JS (see DECISIONS.md). It dominates the bundle; the code is ~55 KB plus better-sqlite3.
 - [x] Should Claude's replies be logged as `assistant_note` by default, or not at all? **Off by default.**
 - [ ] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)? (Measure in M3; pull timeout is 3 s for now.)
 

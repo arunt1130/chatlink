@@ -34,7 +34,7 @@ describe("M2a index never deletes or writes shared files", { timeout: 60_000 }, 
         expect(() => SqliteIndex.open(f)).toThrow(/must end in/);
       }
       await expect(
-        main(["rebuild", "--repo", repo, "--me", "arun", "--state", s.stateDir("arun"), "--index", f], { env: s.env }),
+        main(["rebuild", "--repo", repo, "--me", "arun", "--state", s.stateDir("arun"), "--index", f, "--no-model"], { env: s.env }),
       ).rejects.toThrow();
     }
     expect(() => deleteIndexFiles(mine)).toThrow(/non-index/);
@@ -89,7 +89,7 @@ describe("M2a search input edge cases", () => {
     const orig = console.log;
     console.log = (x: string) => out.push(x);
     try {
-      expect(await main(["search", "--repo", s.clone("arun"), "--state", state, "should", "we", "cache?"])).toBe(0);
+      expect(await main(["search", "--repo", s.clone("arun"), "--state", state, "--no-model", "should", "we", "cache?"])).toBe(0);
     } finally {
       console.log = orig;
     }

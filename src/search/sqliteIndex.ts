@@ -4,13 +4,15 @@ import Database from "better-sqlite3";
 import { type Event, type StatusEvent, type StatusValue, type Tier, tierOf } from "../events/schema";
 import { type EventStore, type IngestResult, canonicalJson } from "../events/store";
 import { isInsideOrEqual } from "../events/paths";
-import { type RankingConfig, RANKING, SEARCH_DEFAULTS, combineScore, recencyFactor } from "./ranking";
+import { type Embedder, dot } from "../embed/types";
+import { type RankingConfig, SEARCH_DEFAULTS, rankingWith, scoreOf } from "./ranking";
+import { queryTerms } from "./query";
 
 /**
  * Bump when the table layout or what gets indexed changes. A mismatch wipes
  * the index; the next sync rebuilds it from the logs (it is derived data).
  */
-export const INDEX_SCHEMA_VERSION = 1;
+export const INDEX_SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE events (
@@ -43,10 +45,14 @@ CREATE TRIGGER events_au AFTER UPDATE ON events BEGIN
   INSERT INTO events_fts (rowid, body) VALUES (new.rowid, new.body);
 END;
 CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+-- One embedding per event with text (float32 little-endian), for the embedder named in meta.embedder.
+CREATE TABLE vectors (rowid INTEGER PRIMARY KEY, vec BLOB NOT NULL);
+CREATE TRIGGER events_ad_vec AFTER DELETE ON events BEGIN DELETE FROM vectors WHERE rowid = old.rowid; END;
 `;
 
 const DROP = `
 DROP TRIGGER IF EXISTS events_ai; DROP TRIGGER IF EXISTS events_ad; DROP TRIGGER IF EXISTS events_au;
+DROP TRIGGER IF EXISTS events_ad_vec; DROP TABLE IF EXISTS vectors;
 DROP TABLE IF EXISTS events_fts; DROP TABLE IF EXISTS events; DROP TABLE IF EXISTS meta;
 `;
 
@@ -75,6 +81,8 @@ export type SearchHit = {
   /** Length of the full text, so a caller knows how much was cut. */
   textLength: number;
   score: number;
+  /** Why it matched: normalized keyword score and vector similarity, each in [0, 1]. */
+  match: { keyword: number; vector: number };
   /** The status in effect for this item, if anyone marked it. */
   status?: HitStatus;
 };
@@ -86,10 +94,19 @@ export type OpenOptions = {
    * different repo is wiped on open.
    */
   source?: string;
+  /**
+   * Enables vector search. Every event with text gets an embedding at ingest.
+   * Opening with a different embedder (by id) re-embeds everything; events
+   * missing a vector are embedded on open. Without one, search is keyword-only.
+   */
+  embedder?: Embedder;
 };
 
 type Row = { canon: string };
-type HitRow = { canon: string; body: string | null; tier: string | null; score: number };
+type Cand = { rowid: number; ts_ms: number; id: string; keyword: number; vector: number };
+
+const toBlob = (v: Float32Array) => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
+const fromBlob = (b: Buffer) => new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
 
 /** The text an event contributes to keyword search. */
 function bodyOf(e: Event): string | null {
@@ -97,15 +114,9 @@ function bodyOf(e: Event): string | null {
   return typeof e.text === "string" ? e.text : null;
 }
 
-/** Turns free text into an FTS5 query: each word quoted, OR-ed. Never passes FTS syntax through. */
-export function toFtsQuery(query: string, maxTerms: number = SEARCH_DEFAULTS.maxQueryTerms): string | null {
-  const words = query.normalize("NFKC").toLowerCase().match(/[\p{L}\p{N}]+/gu) ?? [];
-  const uniq = [...new Set(words)].slice(0, maxTerms);
-  return uniq.length ? uniq.map((w) => `"${w}"`).join(" OR ") : null;
-}
 
 /**
- * The local SQLite index (M2a: keyword search + recency). Also an EventStore,
+ * The local SQLite index: keyword (FTS5) + vector search, hybrid-ranked. Also an EventStore,
  * with the same idempotent-by-id ingest and status resolution as MemoryStore.
  * Fully derived from the logs; delete it any time and rebuild.
  */
@@ -113,9 +124,12 @@ export class SqliteIndex implements EventStore {
   readonly file: string;
   private db: Database.Database;
 
-  private constructor(file: string, db: Database.Database) {
+  readonly embedder: Embedder | undefined;
+
+  private constructor(file: string, db: Database.Database, embedder: Embedder | undefined) {
     this.file = file;
     this.db = db;
+    this.embedder = embedder;
   }
 
   static open(file: string, opts: OpenOptions = {}): SqliteIndex {
@@ -123,20 +137,48 @@ export class SqliteIndex implements EventStore {
     if (abs !== ":memory:") mkdirSync(path.dirname(abs), { recursive: true });
     let idx: SqliteIndex;
     try {
-      idx = new SqliteIndex(abs, SqliteIndex.connect(abs));
+      idx = new SqliteIndex(abs, SqliteIndex.connect(abs), opts.embedder);
     } catch (e) {
       // A corrupt or foreign file is just stale derived data: replace it.
       if (abs === ":memory:" || !isCorrupt(e)) throw e;
       deleteIndexFiles(abs);
-      idx = new SqliteIndex(abs, SqliteIndex.connect(abs));
+      idx = new SqliteIndex(abs, SqliteIndex.connect(abs), opts.embedder);
     }
-    if (opts.source !== undefined) {
-      const src = path.resolve(opts.source);
-      const prev = idx.getMeta("source");
-      if (prev !== null && prev !== src) idx.reset();
-      idx.setMeta("source", src);
+    try {
+      if (opts.source !== undefined) {
+        const src = path.resolve(opts.source);
+        const prev = idx.getMeta("source");
+        if (prev !== null && prev !== src) idx.reset();
+        idx.setMeta("source", src);
+      }
+      idx.syncEmbeddings();
+    } catch (e) {
+      idx.close();
+      throw e;
     }
     return idx;
+  }
+
+  /**
+   * Makes the stored vectors match this index's embedder: a different model
+   * drops them all; then every event with text but no vector is embedded.
+   * Returns how many were embedded. A no-op without an embedder.
+   */
+  syncEmbeddings(): number {
+    const em = this.embedder;
+    if (!em) return 0;
+    return this.db.transaction(() => {
+      if (this.getMeta("embedder") !== em.id) {
+        this.db.exec("DELETE FROM vectors");
+        this.setMeta("embedder", em.id);
+      }
+      const missing = this.db
+        .prepare("SELECT e.rowid AS rowid, e.body AS body FROM events e LEFT JOIN vectors v ON v.rowid = e.rowid WHERE v.rowid IS NULL AND e.body IS NOT NULL")
+        .all() as { rowid: number; body: string }[];
+      const put = this.db.prepare("INSERT OR REPLACE INTO vectors (rowid, vec) VALUES (?, ?)");
+      for (const m of missing) put.run(m.rowid, toBlob(em.embed(m.body)));
+      return missing.length;
+    })();
   }
 
   private static connect(file: string): Database.Database {
@@ -171,6 +213,7 @@ export class SqliteIndex implements EventStore {
       this.db.exec(DROP);
       this.db.exec(SCHEMA);
       if (source !== null) this.setMeta("source", source);
+      if (this.embedder) this.setMeta("embedder", this.embedder.id);
     })();
   }
 
@@ -214,6 +257,16 @@ export class SqliteIndex implements EventStore {
     const update = this.db.prepare(
       "UPDATE events SET author = @author, ts = @ts, ts_ms = @ts_ms, kind = @kind, tier = @tier, target = @target, body = @body, canon = @canon WHERE id = @id",
     );
+    const rowidOf = this.db.prepare("SELECT rowid FROM events WHERE id = ?").pluck();
+    const putVec = this.db.prepare("INSERT OR REPLACE INTO vectors (rowid, vec) VALUES (?, ?)");
+    const dropVec = this.db.prepare("DELETE FROM vectors WHERE rowid = ?");
+    const em = this.embedder;
+    const embedRow = (id: string, body: string | null) => {
+      if (!em) return;
+      const rowid = rowidOf.get(id) as number;
+      if (body === null) dropVec.run(rowid);
+      else putVec.run(rowid, toBlob(em.embed(body)));
+    };
     for (const e of events) {
       const canon = canonicalJson(e);
       const prev = find.get(e.id) as Row | undefined;
@@ -238,9 +291,11 @@ export class SqliteIndex implements EventStore {
         r.conflicts++;
         if (prev.canon <= canon) continue;
         update.run(row);
+        embedRow(row.id, row.body);
         continue;
       }
       insert.run(row);
+      embedRow(row.id, row.body);
       r.added++;
     }
     return r;
@@ -274,17 +329,43 @@ export class SqliteIndex implements EventStore {
 
   // ---- search ---------------------------------------------------------------
 
-  /** Keyword search ranked by bm25 × recency. Free text in; FTS syntax is never interpreted. */
+  /**
+   * For each of `rowids`: the idf-weighted share of `terms` it contains, in
+   * [0, 1]. A term no document contains still counts in the denominator (it
+   * is part of what was asked). idf = ln(1 + (N − df + 0.5) / (df + 0.5)).
+   */
+  private termCoverage(terms: string[], rowids: Set<number>): Map<number, number> {
+    const n = (this.db.prepare("SELECT count(*) AS n FROM events WHERE body IS NOT NULL").get() as { n: number }).n;
+    const match = this.db.prepare("SELECT rowid FROM events_fts WHERE events_fts MATCH ?").pluck();
+    const got = new Map<number, number>();
+    let total = 0;
+    for (const t of terms) {
+      const hits = match.all(`"${t}"`) as number[];
+      const idf = Math.log(1 + (n - hits.length + 0.5) / (hits.length + 0.5));
+      total += idf;
+      for (const r of hits) if (rowids.has(r)) got.set(r, (got.get(r) ?? 0) + idf);
+    }
+    for (const [r, v] of got) got.set(r, total > 0 ? v / total : 0);
+    return got;
+  }
+
+  /**
+   * Hybrid search: keyword (bm25) and vector (cosine) candidates, merged and
+   * ranked by `scoreOf` (see ranking.ts). Free text in; FTS syntax is never
+   * interpreted. Keyword-only when the index has no embedder.
+   */
   search(query: string, opts: SearchOptions = {}): SearchHit[] {
-    const fts = toFtsQuery(query);
-    if (!fts) return [];
-    const cfg: RankingConfig = { ...RANKING, ...opts.ranking };
+    const terms = queryTerms(query);
+    if (terms.length === 0) return [];
+    const fts = terms.map((w) => `"${w}"`).join(" OR ");
+    const cfg: RankingConfig = rankingWith(opts.ranking);
     const now = opts.now ?? Date.now();
     const limit = clampLimit(opts.limit);
+    const pool = Math.max(limit, Math.floor(cfg.candidatePool));
     const maxChars = Math.max(1, opts.maxTextChars ?? SEARCH_DEFAULTS.maxTextChars);
 
-    const where: string[] = ["events_fts MATCH @fts"];
-    const params: Record<string, unknown> = { fts, now, limit };
+    const where: string[] = [];
+    const params: Record<string, unknown> = { fts, pool };
     if (opts.author !== undefined) {
       where.push("e.author = @author");
       params.author = opts.author;
@@ -298,36 +379,74 @@ export class SqliteIndex implements EventStore {
       params.since = ms;
     }
 
-    // Registered per call so the weights in force are exactly this call's.
-    this.db.function("chatlink_score", { deterministic: true }, (kw: unknown, tsMs: unknown, nowMs: unknown) =>
-      combineScore(Number(kw), recencyFactor(Number(nowMs) - Number(tsMs), cfg)),
-    );
-    const rows = this.db
-      .prepare(
-        `SELECT e.canon AS canon, e.body AS body, e.tier AS tier,
-                chatlink_score(-bm25(events_fts), e.ts_ms, @now) AS score
-           FROM events_fts JOIN events e ON e.rowid = events_fts.rowid
-          WHERE ${where.join(" AND ")}
-          ORDER BY score DESC, e.ts_ms DESC, e.id DESC
-          LIMIT @limit`,
-      )
-      .all(params) as HitRow[];
+    const filter = where.length ? ` AND ${where.join(" AND ")}` : "";
+    const cands = new Map<number, Cand>();
 
-    return rows.map((r) => {
-      const e = JSON.parse(r.canon) as Event;
-      const full = r.body ?? "";
+    // Keyword candidates: best bm25 first. Their score is absolute, not relative
+    // to the best hit: idf-weighted share of query terms matched, scaled by bm25.
+    const kw = this.db
+      .prepare(
+        `SELECT e.rowid AS rowid, e.ts_ms AS ts_ms, e.id AS id, -bm25(events_fts) AS kw
+           FROM events_fts JOIN events e ON e.rowid = events_fts.rowid
+          WHERE events_fts MATCH @fts${filter}
+          ORDER BY bm25(events_fts), e.ts_ms DESC, e.id DESC
+          LIMIT @pool`,
+      )
+      .all(params) as { rowid: number; ts_ms: number; id: string; kw: number }[];
+    const best = kw.reduce((m, r) => Math.max(m, r.kw), 0);
+    const coverage = kw.length ? this.termCoverage(terms, new Set(kw.map((r) => r.rowid))) : new Map<number, number>();
+    for (const r of kw) {
+      const keyword = (coverage.get(r.rowid) ?? 0) * (0.5 + 0.5 * (best > 0 ? r.kw / best : 0));
+      cands.set(r.rowid, { rowid: r.rowid, ts_ms: r.ts_ms, id: r.id, keyword, vector: 0 });
+    }
+
+    // Vector candidates: exact scan (see DECISIONS.md), above minVectorSim.
+    const em = this.embedder;
+    const qv = em ? em.embed(query) : null;
+    if (em && qv && qv.some((x) => x !== 0)) {
+      const { fts: _f, pool: _p, ...vparams } = params;
+      const rows = this.db
+        .prepare(`SELECT e.rowid AS rowid, e.ts_ms AS ts_ms, e.id AS id, v.vec AS vec FROM vectors v JOIN events e ON e.rowid = v.rowid WHERE 1${filter}`)
+        .all(vparams) as { rowid: number; ts_ms: number; id: string; vec: Buffer }[];
+      const sims: { r: (typeof rows)[number]; sim: number }[] = [];
+      for (const r of rows) {
+        const v = fromBlob(r.vec);
+        if (v.length !== qv.length) continue;
+        const sim = Math.min(1, dot(qv, v));
+        if (sim >= cfg.minVectorSim) sims.push({ r, sim });
+      }
+      sims.sort((a, b) => b.sim - a.sim || b.r.ts_ms - a.r.ts_ms || (a.r.id < b.r.id ? 1 : -1));
+      for (const { r, sim } of sims.slice(0, pool)) {
+        const c = cands.get(r.rowid);
+        if (c) c.vector = sim;
+        else cands.set(r.rowid, { rowid: r.rowid, ts_ms: r.ts_ms, id: r.id, keyword: 0, vector: sim });
+      }
+    }
+
+    const getRow = this.db.prepare("SELECT canon, body, tier FROM events WHERE rowid = ?");
+    const scored = [...cands.values()].map((c) => {
+      const row = getRow.get(c.rowid) as { canon: string; body: string | null; tier: Tier | null };
+      const s = this.resolveStatus(c.id);
+      const score = scoreOf({ keyword: c.keyword, vector: c.vector, ageMs: now - c.ts_ms, tier: row.tier, status: s?.status ?? null }, cfg);
+      return { c, row, s, score };
+    });
+    scored.sort((a, b) => b.score - a.score || b.c.ts_ms - a.c.ts_ms || (a.c.id < b.c.id ? 1 : a.c.id > b.c.id ? -1 : 0));
+
+    return scored.slice(0, limit).map(({ c, row, s, score }) => {
+      const e = JSON.parse(row.canon) as Event;
+      const full = row.body ?? "";
       const hit: SearchHit = {
         id: e.id,
         author: e.author,
         ts: e.ts,
         kind: e.kind,
-        tier: (r.tier as Tier | null) ?? null,
+        tier: row.tier ?? null,
         text: full.length > maxChars ? cutText(full, maxChars) : full,
         truncated: full.length > maxChars,
         textLength: full.length,
-        score: r.score,
+        score,
+        match: { keyword: c.keyword, vector: c.vector },
       };
-      const s = this.resolveStatus(e.id);
       if (s) hit.status = { id: s.id, author: s.author, ts: s.ts, status: s.status, reason: s.reason };
       return hit;
     });

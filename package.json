@@ -10,7 +10,8 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild chatlink=src/index.ts cli=src/cli.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --external:better-sqlite3"
+    "build": "esbuild chatlink=src/index.ts cli=src/cli.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --external:better-sqlite3",
+    "fetch-model": "node scripts/fetch-model.mjs"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^9.6.0",
