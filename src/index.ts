@@ -9,3 +9,6 @@ export * from "./transport/gitcli";
 export * from "./transport/git";
 export * from "./transport/shared";
 export * from "./transport/state";
+export * from "./search/ranking";
+export * from "./search/sqliteIndex";
+export * from "./search/sync";

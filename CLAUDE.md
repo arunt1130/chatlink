@@ -40,7 +40,8 @@ TypeScript on Node (see DECISIONS.md). Scripts are created with `package.json` i
 - Install deps: `npm ci`
 - Test: `npm test` (vitest; offline)
 - Typecheck: `npm run typecheck` (tsc --noEmit)
-- Build: `npm run build` (esbuild → single JS file)
+- Build: `npm run build` (esbuild → `dist/chatlink.js` library + `dist/cli.js`; `better-sqlite3` stays external)
+- Rebuild index: `node dist/cli.js rebuild --repo <clone> --me <name> --state <dir>` (from M2a)
 - Run server (stdio): `node dist/server.js` (from M3)
 
 Approved M0/M1 plan: docs/plan-m0-m1.md.

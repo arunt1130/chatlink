@@ -87,3 +87,31 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - A commit by someone else into `logs/<me>/` on the remote makes every pull conflict. The rebase is aborted, so nothing is lost, but the clone stays stale until a human fixes it. `lastError` says why.
   - `--autostash` can leave conflict markers in a hand-edited file in another person's folder. The reader skips those lines.
 - **Reason:** SPEC says push must not block the reply, and a hung network must not stall every turn. Never-throw-after-write keeps "never lose an event" from turning into "duplicate an event".
+
+### 2026-11-12 — M2a SQLite driver: better-sqlite3
+- **Decision:** Use `better-sqlite3` (prebuilt native binaries, bundled SQLite 3.53 with FTS5). It is the only runtime dependency. esbuild marks it external, so the bundle ships its `.node` file alongside.
+- **Alternatives considered:** Node's built-in `node:sqlite` (zero deps); sql.js / wa-sqlite (WASM).
+- **Reason:** `node:sqlite` in Node 22.13 is built without FTS5 ("no such module: fts5"), and Claude Desktop's Node version is outside our control. The WASM builds don't include FTS5 by default and can't load sqlite-vec for M2b. better-sqlite3 is the most-used choice and documents `loadExtension` for sqlite-vec. **Risk for M4:** the native binary must match the platform and the Node ABI of the runtime Claude Desktop uses. Check this when building the `.mcpb`. All SQLite access stays in `src/search/sqliteIndex.ts`, so swapping drivers is a one-file change.
+
+### 2026-11-12 — M2a index design
+- **Decision:**
+  - (1) One table `events` (one row per id, canonical JSON kept as the source for `get`/`all`), an external-content FTS5 table kept in sync by triggers, and a `meta` table (`cursor`, `source`). The layout version is stored in `PRAGMA user_version`. A mismatch drops everything, and the next sync re-reads all logs.
+  - (2) Tokenizer `porter unicode61 remove_diacritics 2`, so "cache" matches "caching" and "cafe" matches "café". Each event's indexed text is `text`, or `reason` for `status`.
+  - (3) A query is free text: it is split into letter/digit words, each word is quoted, and the words are OR-ed, so FTS syntax in a query is never interpreted. bm25 rewards matching more words.
+  - (4) Ranking is `(-bm25) × recency`, where recency = `floor + (1−floor)·0.5^(age/halfLife)` (defaults: 30-day half-life, floor 0.3). It is computed in SQL through a registered JS function, so LIMIT applies to the final score. Ties go to the newer `ts`, then the higher `id`. All knobs are in `src/search/ranking.ts`. The vector score and the confirmed boost are deferred to M2b (that milestone's scope).
+  - (5) Incremental ingest is `syncIndex`: `fetchNew(cursor)`, then ingest plus cursor update in one transaction. Ingest is idempotent, so re-reading after a crash or an unknown cursor is harmless.
+  - (6) Rebuild is `rebuildIndex` / `chatlink rebuild`: delete the file (and WAL/SHM), create a fresh index, and run a sync with no cursor. Same code path as incremental, so the results match.
+  - (7) The index refuses a file path inside the shared repo. An index opened with a different `source` repo is wiped. A corrupt or non-SQLite file is deleted and recreated (derived data). `synchronous=NORMAL` + WAL: the index favours speed, because the logs are the durable copy.
+  - (8) `SqliteIndex` implements M0's `EventStore` with the same conflict rule as `MemoryStore` (keep the canonically smaller event), and resolves status with `ORDER BY ts_ms DESC, id DESC`.
+  - (9) Search hits carry `id, author, ts, kind, tier`, verbatim `text` (cut to 1000 chars with `truncated` and `textLength`), `score`, and the item's current `status` if anyone marked it.
+- **Alternatives considered:** A contentless FTS table; additive score mixing; re-ranking a bm25 top-N in JS; passing raw FTS5 syntax through.
+- **Reason:** One file, one code path for rebuild and incremental ingest, and nothing the user types can break a query. A multiplicative recency factor guarantees "newer outranks older equal match" while still letting a much better match win.
+
+### 2026-11-12 — M2a fixes after spec review
+- **Decision:**
+  - (1) An index file path must end in `.sqlite`, `.sqlite3` or `.db`, and must lie outside the shared repo, both lexically and after resolving symlinks or junctions on the deepest existing ancestor. `assertIndexPath` checks this before anything opens or deletes the file, and both `rebuildIndex` and `SqliteIndex.open` call it. `deleteIndexFiles` refuses any other extension. The shared `.gitignore` only allows `*.jsonl` and `space.json`, so no index operation can delete a shared file, even with no `source` given.
+  - (2) `since` must be an ISO 8601 date (read as UTC midnight) or a date-time with an explicit `Z` or offset. A date-time with no zone is rejected rather than read as local time.
+  - (3) Truncated text never splits a UTF-16 surrogate pair.
+  - (4) `chatlink search` is a small debugging subcommand next to `rebuild`. It reads the local index only and doesn't sync. The build now emits `dist/chatlink.js` (library) and `dist/cli.js`, with `better-sqlite3` external (a native module can't be bundled).
+- **Known, accepted differences:** Rebuild reads every log file at HEAD plus working-tree lines, while incremental ingest only sees files changed in commits. They can differ only if someone deletes a log file (which breaks append-only; incremental keeps those events), or for my lines that are on disk but not yet committed (the next recovery commit brings incremental level). Rebuilding while the index is open elsewhere fails on Windows (EBUSY). The M3 server should rebuild through its own open index (`reset()` + sync) rather than deleting the file.
+- **Reason:** The review found that a mistyped `--index` could delete a log, and the recovery commit would then commit and push that deletion. Checking a path before deleting it is the only safe order.

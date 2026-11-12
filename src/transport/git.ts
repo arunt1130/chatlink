@@ -1,7 +1,7 @@
 import { existsSync, readdirSync, rmSync } from "node:fs";
 import path from "node:path";
 import { type Event, AUTHOR_RE } from "../events/schema";
-import { LOG_FILE_RE, WriteRefusedError, assertAuthor } from "../events/paths";
+import { LOG_FILE_RE, WriteRefusedError, assertAuthor, isInsideOrEqual } from "../events/paths";
 import { type Skipped, readAllLogs, readLogFile } from "../events/reader";
 import { appendEvents } from "../events/writer";
 import { type GitRunner, type ProcResult, runGit } from "./gitcli";
@@ -56,12 +56,6 @@ class Mutex {
     this.tail = r.catch(() => {});
     return r;
   }
-}
-
-function isInsideOrEqual(child: string, parent: string): boolean {
-  const ci = process.platform === "win32" || process.platform === "darwin";
-  const rel = path.relative(ci ? parent.toLowerCase() : parent, ci ? child.toLowerCase() : child);
-  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
 }
 
 const describe = (r: ProcResult) => (r.timedOut ? "timed out" : (r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`).split("\n")[0]!);

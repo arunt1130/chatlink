@@ -33,6 +33,14 @@ function isStrictlyInside(child: string, parent: string): boolean {
   return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
 }
 
+/** True if `child` is `parent` or anywhere under it (case-insensitive on win32/darwin). */
+export function isInsideOrEqual(child: string, parent: string): boolean {
+  const c = path.resolve(child);
+  const p = path.resolve(parent);
+  const rel = path.relative(caseInsensitiveFs() ? p.toLowerCase() : p, caseInsensitiveFs() ? c.toLowerCase() : c);
+  return rel === "" || (!rel.startsWith("..") && !path.isAbsolute(rel));
+}
+
 /**
  * Refuses unless `target` is inside logs/<me>/, both lexically and after
  * resolving symlinks. logs/<me> must already exist.
