@@ -16,3 +16,7 @@ export * from "./search/sync";
 export * from "./embed/types";
 export * from "./embed/wordpiece";
 export * from "./embed/model2vec";
+export * from "./config";
+export * from "./app/cursor";
+export * from "./app/decisions";
+export * from "./app/chatlink";

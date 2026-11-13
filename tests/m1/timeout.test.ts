@@ -52,16 +52,30 @@ describe("M1 timeouts", () => {
 
   it("appendMine does not wait for the push", async () => {
     const s = makeSpace();
-    const slowPush: GitRunner = async (args, opts) => {
-      if (args[0] === "push") await new Promise((r) => setTimeout(r, 2000));
-      return runGit(args, opts);
+    // The push blocks until the test opens the gate, so appendMine can only
+    // return first if it really doesn't wait for delivery (no timing race).
+    let open!: () => void;
+    const gate = new Promise<void>((r) => (open = r));
+    let pushStarted = false;
+    let pushDone = false;
+    const gatedPush: GitRunner = async (args, opts) => {
+      if (args[0] !== "push") return runGit(args, opts);
+      pushStarted = true;
+      await gate;
+      const r = await runGit(args, opts);
+      pushDone = true;
+      return r;
     };
-    const a = s.transport("arun", { runGit: slowPush });
+    const a = s.transport("arun", { runGit: gatedPush });
     const e = makeEvent("arun", { kind: "message", text: "quick" });
-    const t0 = Date.now();
-    await a.appendMine([e]);
-    expect(Date.now() - t0).toBeLessThan(1800);
+    const r = await a.appendMine([e]);
+    expect(r).toEqual({ written: 1, committed: true });
+    expect(pushDone).toBe(false); // returned while delivery is still pending
+    for (let i = 0; i < 100 && !pushStarted; i++) await new Promise((res) => setTimeout(res, 20));
+    expect(pushStarted).toBe(true);
+    open();
     await a.whenIdle();
+    expect(pushDone).toBe(true);
     expect((await a.syncState()).unpushed).toBe(0);
     expect(ids(s.remoteEvents())).toEqual([e.id]);
   }, 60_000);

@@ -43,7 +43,8 @@ TypeScript on Node (see DECISIONS.md). Scripts are created with `package.json` i
 - Typecheck: `npm run typecheck` (tsc --noEmit)
 - Build: `npm run build` (esbuild → `dist/chatlink.js` library + `dist/cli.js`; `better-sqlite3` stays external)
 - Rebuild index: `node dist/cli.js rebuild --repo <clone> --me <name> --state <dir>` (from M2a)
-- Run server (stdio): `node dist/server.js` (from M3)
+- Run server (stdio): `node dist/server.js` with `CHATLINK_ME` and `CHATLINK_REPO` set (from M3)
+- Local two-person test space for Claude Desktop: `node scripts/dev-space.mjs <folder outside OneDrive>`; see docs/m3-desktop-test.md
 
 Approved M0/M1 plan: docs/plan-m0-m1.md.
 

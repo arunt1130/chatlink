@@ -145,3 +145,31 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - (3) Known limits: an embedder's id comes from `SOURCE.json` (written by `fetch-model` only after every hash check passes). Vectors are stored in native byte order: they are local, derived data, never shared. A model change re-embeds the whole index synchronously on open, which takes about 1 s per 8k events.
   - (4) better-sqlite3 no longer needs to load extensions (sqlite-vec isn't used). It stays because FTS5 is the deciding reason.
 - **Reason:** Spec-review follow-ups. These are recorded so M3 can measure them against real use.
+
+### 2026-11-12 — M3 MCP server
+- **Decision:**
+  - (1) The official `@modelcontextprotocol/sdk` (1.32.2) over stdio, with `zod` 4.6.7. zod 3 has a high-severity advisory, and the SDK accepts zod 4. esbuild bundles only the stdio server parts: `dist/server.js` is ~1.4 MB unminified, minified in M4. Logs go to stderr only; stdout is the protocol.
+  - (2) The logic lives in `Chatlink` (`src/app/chatlink.ts`), independent of MCP. `src/server.ts` only maps tools to it, so tests drive it directly and through an in-memory MCP client. All calls are serialized with a mutex.
+  - (3) Config comes from `CHATLINK_ME` and `CHATLINK_REPO` (required), plus optional `CHATLINK_STATE_DIR`, `CHATLINK_INDEX` and `CHATLINK_MODEL_DIR` (`none` = keyword-only), or the same as flags. This is what Claude Desktop's `env` and MCPB `user_config` provide. The default state dir is per user and per clone (`%LOCALAPPDATA%\chatlink\<me>-<hash(clone path)>`, Application Support on macOS, XDG state elsewhere). So two entries on one machine never share state, and the state is never inside the repo.
+  - (4) `sync_turn` order: pull + ingest, then **write my message first** (durable before anything else), then search (excluding the message just written), then the new-from-others digest, then decision detection. A missing or broken model is a warning and leaves search keyword-only, never a startup failure.
+  - (5) The read cursor (`read-cursor.json` in the state dir) is a position in the index's ingest order, plus the index epoch and the newest `ts` seen. Ingest order means an event that arrives late from someone who was offline still counts as new. After a rebuild (new epoch), the cursor re-anchors on `ts`. `sync_turn`'s digest and `whats_new` share the cursor: anything shown counts as seen. The digest shows 20 items per turn, and `more: true` says there are more.
+  - (6) A sixth tool, `get_item(id)`, returns the full text. SPEC says long texts are "truncated … with the id for fetching more", and this is that fetch. Items are cut to 600 characters elsewhere.
+  - (7) `mark_status` refuses ids that aren't in the index, so a guessed id can't create a status pointing at nothing. Nothing is written when it refuses.
+  - (8) `catch_me_up` runs `whats_new` on the server side and embeds the result in the prompt text. The digest arrives even if Claude doesn't call a tool.
+  - (9) Decision detection (v1 heuristic, `src/app/decisions.ts`): regexes for closing cues ("let's drop…", "ruled out", "not going to build…") and deciding cues ("we decided…", "let's go with…", "agreed on…"). Questions never trigger it. A close targets the best related item that is someone else's statement and not already closed. A decision targets this message. The result carries a ready-made one-line `ask`.
+  - (10) Latency (see SPEC open question): 1.1–1.7 s per `sync_turn` against a local remote, nearly all git process start-up. Accepted for now; re-measure against GitHub in M5. If it's too slow, the options are batching git calls, a longer-lived `git cat-file --batch`, or moving the commit off the reply path. The last one needs care with "durable before reply".
+- **Alternatives considered:** A hand-written JSON-RPC loop; a ts-based read cursor; having `catch_me_up` only tell Claude to call `whats_new`.
+- **Reason:** The SDK is the best-known path and tracks protocol changes. A ts cursor would lose late events. Server-side `catch_me_up` is the "always one click away" guarantee.
+- **Manual acceptance:** The Claude Desktop run with two entries is described in `docs/m3-desktop-test.md`, with `scripts/dev-space.mjs` to create a local two-person space. The same flow is automated in `tests/m3/e2e.test.ts`.
+
+### 2026-11-12 — M3 fixes after spec review (supersedes the re-anchor part of item 5 of "M3 MCP server")
+- **Decision:**
+  - (1) **Re-anchoring the read cursor after a rebuild.** A rebuild ingests in author-folder order, not time order. So a "position at ts ≤ last seen" can land past new events from authors whose folders sort earlier. With me = krish, arun's new messages vanished from the digest. Now a cursor from an older epoch becomes a *floor*: the rebuilt rows (sequence ≤ the index's max at re-anchor) count as new only if their `ts` is after the newest `ts` already seen. Rows ingested later count as new as usual. The floor is dropped once the cursor passes the rebuilt rows. Tested with me first, middle and last among 2–3 authors. Residual: an event that was on its way late, with an old `ts`, at the moment of a rebuild is treated as seen. It is still searchable.
+  - (2) `share=false` never returns `possible_decision`, so a yes can't put off-record words into the log through a `mark_status` reason.
+  - (3) The SPEC tools table now lists `get_item` and `whats_new`'s optional `limit`.
+  - (4) The `sync_turn` description says `unpushed_commits > 0` right after a write is normal (background push).
+- **Known risks, deferred to M4 (setup/packaging):**
+  - Only one server process per clone is assumed, not enforced. If Desktop restarts a server while the old one is still in `close()` (up to 5 s), two processes share a clone. M1's lock cleanup after a pull timeout could then remove the other process's live `index.lock`. Plan: an exclusive lockfile in the state dir with pid and stale-pid takeover.
+  - On Windows, a hard kill skips `close()`. Safe: commits stay queued.
+  - The default state dir hashes the lowercased clone path. Two clones whose paths differ only in case, on a case-sensitive file system, would share state.
+- **Reason:** Spec-review findings. The Claude Desktop acceptance run is manual and is recorded below once done.

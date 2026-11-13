@@ -136,9 +136,10 @@ MCP tools are called at the model's discretion, so no tool can be guaranteed to 
 | --- | --- | --- |
 | `sync_turn` | `message` (the user's message, verbatim), `share` (default true) | Relevant past items, the "new from others" digest, sync state, and any items in this message that look like decisions (see below) |
 | `search` | `query`, optional `author`, `since`, `limit` | Ranked items |
-| `whats_new` | none | Everything from others since my read cursor, then advances the cursor |
+| `whats_new` | optional `limit` | Everything from others since my read cursor, then advances the cursor (`more` says if there is more) |
 | `mark_status` | `target` (event id), `status`, `reason` | The new `status` event |
 | `add_note` | `text` | The new `note` event |
+| `get_item` | `id` | One item with its full text (added in M3: the "id for fetching more" below) |
 
 Every returned item includes `id`, `author`, `ts`, `kind`, `tier`, and the verbatim `text` (truncated if long, with the id for fetching more).
 
@@ -221,7 +222,7 @@ Build in this order. Each milestone ends with its tests passing and a commit. Te
 - [x] Python or TypeScript, given bundle size and embedding-model options? **TypeScript** (see DECISIONS.md).
 - [x] Which local embedding model, and how big is the resulting bundle? **model2vec `potion-base-32M`** (MIT, 129 MB, 512-dim), run in pure JS (see DECISIONS.md). It dominates the bundle; the code is ~55 KB plus better-sqlite3.
 - [x] Should Claude's replies be logged as `assistant_note` by default, or not at all? **Off by default.**
-- [ ] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)? (Measure in M3; pull timeout is 3 s for now.)
+- [x] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)? **Measured in M3** (local bare remote, Windows): pull+ingest 0.5–1.1 s, commit 0.4 s, search ~2 ms, total 1.1–1.7 s. Almost all of it is git process start-up (~45 ms each, about ten per turn), not chatlink. `sync_turn` always pulls (MUST). `search`/`whats_new`/`mark_status` skip the pull if one succeeded in the last 15 s. Re-measure against real GitHub in M5 (see DECISIONS.md).
 
 ## References
 

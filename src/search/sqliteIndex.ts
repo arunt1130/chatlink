@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
 import Database from "better-sqlite3";
@@ -69,7 +70,8 @@ export type SearchOptions = {
 
 export type HitStatus = { id: string; author: string; ts: string; status: StatusValue; reason: string };
 
-export type SearchHit = {
+/** How every tool shows an event: who, when, what kind, how trusted, and the verbatim text. */
+export type Item = {
   id: string;
   author: string;
   ts: string;
@@ -80,11 +82,19 @@ export type SearchHit = {
   truncated: boolean;
   /** Length of the full text, so a caller knows how much was cut. */
   textLength: number;
+  /** For a status event: what it marks, and how. */
+  target?: string;
+  marks?: StatusValue;
+  /** For an assistant_note: the event it is about. */
+  about?: string;
+  /** The status in effect for this item, if anyone marked it. */
+  status?: HitStatus;
+};
+
+export type SearchHit = Item & {
   score: number;
   /** Why it matched: normalized keyword score and vector similarity, each in [0, 1]. */
   match: { keyword: number; vector: number };
-  /** The status in effect for this item, if anyone marked it. */
-  status?: HitStatus;
 };
 
 export type OpenOptions = {
@@ -432,24 +442,96 @@ export class SqliteIndex implements EventStore {
     });
     scored.sort((a, b) => b.score - a.score || b.c.ts_ms - a.c.ts_ms || (a.c.id < b.c.id ? 1 : a.c.id > b.c.id ? -1 : 0));
 
-    return scored.slice(0, limit).map(({ c, row, s, score }) => {
-      const e = JSON.parse(row.canon) as Event;
-      const full = row.body ?? "";
-      const hit: SearchHit = {
-        id: e.id,
-        author: e.author,
-        ts: e.ts,
-        kind: e.kind,
-        tier: row.tier ?? null,
-        text: full.length > maxChars ? cutText(full, maxChars) : full,
-        truncated: full.length > maxChars,
-        textLength: full.length,
-        score,
-        match: { keyword: c.keyword, vector: c.vector },
-      };
-      if (s) hit.status = { id: s.id, author: s.author, ts: s.ts, status: s.status, reason: s.reason };
-      return hit;
-    });
+    return scored.slice(0, limit).map(({ c, row, s, score }) => ({
+      ...this.toItem(JSON.parse(row.canon) as Event, maxChars, s ?? null),
+      score,
+      match: { keyword: c.keyword, vector: c.vector },
+    }));
+  }
+
+  // ---- items and ingest order -------------------------------------------------
+
+  /** One event as an Item (with its current status), or undefined if unknown. */
+  item(id: string, maxTextChars: number = SEARCH_DEFAULTS.maxTextChars): Item | undefined {
+    const e = this.get(id);
+    return e ? this.toItem(e, maxTextChars) : undefined;
+  }
+
+  /** `status`: the already-resolved status (null = none); omitted = look it up. */
+  private toItem(e: Event, maxChars: number, known?: StatusEvent | null): Item {
+    const status = known === undefined ? this.resolveStatus(e.id) : (known ?? undefined);
+    const full = bodyOf(e) ?? "";
+    const it: Item = {
+      id: e.id,
+      author: e.author,
+      ts: e.ts,
+      kind: e.kind,
+      tier: tierOf(e),
+      text: full.length > maxChars ? cutText(full, maxChars) : full,
+      truncated: full.length > maxChars,
+      textLength: full.length,
+    };
+    if (e.kind === "status") {
+      if (typeof e.target === "string") it.target = e.target;
+      if (typeof e.status === "string") it.marks = e.status as StatusValue;
+    }
+    if (e.kind === "assistant_note" && typeof e.about === "string") it.about = e.about;
+    if (status) it.status = { id: status.id, author: status.author, ts: status.ts, status: status.status, reason: status.reason };
+    return it;
+  }
+
+  /**
+   * Identifies this index's ingest order. It changes whenever the index is
+   * created or reset, so a stored sequence number is only valid with its epoch.
+   */
+  get epoch(): string {
+    let e = this.getMeta("epoch");
+    if (e === null) {
+      e = randomBytes(8).toString("hex");
+      this.setMeta("epoch", e);
+    }
+    return e;
+  }
+
+  /** The highest ingest sequence number so far (0 when empty). */
+  get maxSeq(): number {
+    return (this.db.prepare("SELECT coalesce(max(rowid), 0) AS n FROM events").get() as { n: number }).n;
+  }
+
+  /**
+   * Events ingested after `seq`, in ingest order (so a late-arriving event with
+   * an old ts still shows up), optionally excluding one author. At most `limit`.
+   *
+   * `floor` re-anchors a cursor after a rebuild, whose ingest order is by
+   * author folder rather than by time: rows up to `upToSeq` count only if their
+   * ts is after `afterTsMs`; rows ingested later always count.
+   */
+  itemsAfter(
+    seq: number,
+    opts: { excludeAuthor?: string; limit?: number; maxTextChars?: number; floor?: { upToSeq: number; afterTsMs: number } } = {},
+  ): { items: (Item & { seq: number })[]; more: boolean; lastSeq: number } {
+    const limit = Math.max(1, Math.floor(opts.limit ?? 50));
+    const where = ["rowid > @seq"];
+    const params: Record<string, unknown> = { seq, limit: limit + 1 };
+    if (opts.excludeAuthor !== undefined) {
+      where.push("author != @me");
+      params.me = opts.excludeAuthor;
+    }
+    if (opts.floor) {
+      where.push("(rowid > @upTo OR ts_ms > @afterTs)");
+      params.upTo = opts.floor.upToSeq;
+      params.afterTs = opts.floor.afterTsMs;
+    }
+    const rows = this.db
+      .prepare(`SELECT rowid, canon FROM events WHERE ${where.join(" AND ")} ORDER BY rowid LIMIT @limit`)
+      .all(params) as { rowid: number; canon: string }[];
+    const more = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const maxChars = Math.max(1, opts.maxTextChars ?? SEARCH_DEFAULTS.maxTextChars);
+    const items = page.map((r) => ({ ...this.toItem(JSON.parse(r.canon) as Event, maxChars), seq: r.rowid }));
+    // With nothing (more) to show, the cursor may jump to the end, past my own events.
+    const lastSeq = more ? page[page.length - 1]!.rowid : this.maxSeq;
+    return { items, more, lastSeq: Math.max(seq, lastSeq) };
   }
 }
 

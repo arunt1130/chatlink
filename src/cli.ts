@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
+import { DEFAULT_MODEL_DIR } from "./config";
 import { Model2Vec } from "./embed/model2vec";
 import type { Embedder } from "./embed/types";
 import { GitTransport } from "./transport/git";
@@ -16,8 +16,7 @@ const USAGE = `usage:
   --model defaults to models/potion-base-32M next to the program (fetch it with scripts/fetch-model.mjs).
   Without a model, search is keyword-only.`;
 
-/** models/potion-base-32M beside the package (dist/.. or src/..). */
-export const DEFAULT_MODEL_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..", "models", "potion-base-32M");
+export { DEFAULT_MODEL_DIR };
 
 export async function main(argv: string[], deps: { env?: NodeJS.ProcessEnv } = {}): Promise<number> {
   const [cmd, ...rest] = argv;
