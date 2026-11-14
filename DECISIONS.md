@@ -173,3 +173,7 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - On Windows, a hard kill skips `close()`. Safe: commits stay queued.
   - The default state dir hashes the lowercased clone path. Two clones whose paths differ only in case, on a case-sensitive file system, would share state.
 - **Reason:** Spec-review findings. The Claude Desktop acceptance run is manual and is recorded below once done.
+
+### 2026-11-14 — M3 acceptance in Claude Desktop: passed
+- **Result:** Arun ran `docs/m3-desktop-test.md` on one Windows laptop: two server entries (`chatlink-arun`, `chatlink-krish`) pointed at two clones of a local bare repo. Krish said caching won't help. In Arun's chat, "Should we cache the query results…" got an answer that named Krish, gave the date and quoted his words. The optional checks also passed: the decision prompt and mark as closed, Krish seeing Arun's close, and off the record writing nothing. Claude used the right server's tools in each chat.
+- **Learned:** Claude Desktop keeps each server's tools separate, so two chatlink entries don't collide. There was no per-chat toggle to be found. Instead, one Project per person, whose instructions name that person's server ("use ONLY the chatlink-krish tools"), worked reliably. `docs/m3-desktop-test.md` is updated to match. `timing_ms` from real Desktop use wasn't captured; measure it in M5.

@@ -34,13 +34,13 @@ Open Claude Desktop → Settings → Developer → Edit Config (`%APPDATA%\Claud
 }
 ```
 
-Both servers expose tools with the same names, so **turn on only one per chat**. Use the tools / connectors menu in the message box: for chat 1, only `chatlink-krish`; for chat 2, only `chatlink-arun`.
+Claude Desktop keeps each server's tools separate, so both entries can stay on. Use **one Project per person**, whose instructions name that person's server (next step).
 
 Server logs: `%APPDATA%\Claude\logs\mcp-server-chatlink-*.log` (the server writes only to stderr).
 
 ## 4. Add the behaviour rules
 
-Create a Project (or use each chat's instructions) with the rules from SPEC.md "Behaviour rules for Claude":
+Create two Projects, `Krish test` and `Arun test`. In each Project's instructions, first put a line naming its server, for example `You are acting for Krish. Use ONLY the chatlink-krish tools. Never use chatlink-arun tools.`, then the rules from SPEC.md "Behaviour rules for Claude":
 
 ```markdown
 Shared memory rules:
@@ -54,14 +54,14 @@ Shared memory rules:
 
 ## 5. The script
 
-1. **Chat 1 (chatlink-krish):** "Caching won't help here: every query has a unique timestamp in it."
+1. **A chat in `Krish test`:** "Caching won't help here: every query has a unique timestamp in it."
    Check: Claude calls `sync_turn`, and `C:/chatlink-test/krish/logs/krish/<today>.jsonl` has the line.
-2. **Chat 2 (chatlink-arun):** "Should we cache the query results to speed things up?"
+2. **A chat in `Arun test`:** "Should we cache the query results to speed things up?"
    **Pass:** Claude names **Krish**, gives the **date**, and **quotes** "Caching won't help here: every query has a unique timestamp in it." It should present it as something Krish *said*, not as a decision.
-3. Optional. **Chat 2:** "Agreed, let's drop the caching idea."
+3. Optional. **Arun's chat:** "Agreed, let's drop the caching idea."
    Check: Claude asks one line, roughly *Mark "Caching won't help here…" as closed?* Answer yes, and it calls `mark_status`.
-4. Optional. **Chat 1:** run the **catch_me_up** prompt (the "+" / prompts menu). It shows Arun's messages and his "closed" mark as confirmed.
-5. Optional. **Chat 2:** "off the record: I think Krish is wrong." Check that nothing is added to `logs/arun/`.
+4. Optional. **Krish's chat:** run the **catch_me_up** prompt (the "+" / prompts menu). It shows Arun's messages and his "closed" mark as confirmed.
+5. Optional. **Arun's chat:** "off the record: I think Krish is wrong." Check that nothing is added to `logs/arun/`.
 
 Record what happened (pass/fail, and the `timing_ms` from a `sync_turn` result) in the M3 section of DECISIONS.md or the M5 notes.
 
