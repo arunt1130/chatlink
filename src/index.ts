@@ -20,3 +20,5 @@ export * from "./config";
 export * from "./app/cursor";
 export * from "./app/decisions";
 export * from "./app/chatlink";
+export * from "./app/lock";
+export * from "./import/transcript";

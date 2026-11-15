@@ -1,5 +1,5 @@
 import path from "node:path";
-import Database from "better-sqlite3";
+import { Db as Database } from "../../src/search/db";
 import { describe, expect, it } from "vitest";
 import { type Event, RANKING, SqliteIndex, makeEvent, rebuildIndex, scoreOf, syncIndex } from "../../src";
 import { makeSpace } from "../helpers/gitFixture";
@@ -101,7 +101,7 @@ describe("M2b embeddings lifecycle", () => {
     const e2 = bagEmbedder("bag:v2", 32);
     idx = openIndex(file, { embedder: e2 });
     expect(e2.calls).toBe(3);
-    const raw = new Database(file, { readonly: true });
+    const raw = new Database(file);
     expect(raw.prepare("SELECT DISTINCT length(vec) AS n FROM vectors").pluck().all()).toEqual([32 * 4]);
     expect(raw.prepare("SELECT value FROM meta WHERE key = 'embedder'").pluck().get()).toBe("bag:v2");
     raw.close();

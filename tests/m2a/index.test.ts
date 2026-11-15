@@ -1,6 +1,6 @@
 import { writeFileSync } from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { Db as Database } from "../../src/search/db";
 import { describe, expect, it } from "vitest";
 import { INDEX_SCHEMA_VERSION, MemoryStore, SqliteIndex, appendEvents, makeEvent, readAllLogs, syncIndex, toFtsQuery } from "../../src";
 import { ids, messages, oneOfEach } from "../helpers/events";

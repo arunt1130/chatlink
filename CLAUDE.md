@@ -41,8 +41,10 @@ TypeScript on Node (see DECISIONS.md). Scripts are created with `package.json` i
 - Fetch the embedding model once (network; ~130 MB into gitignored `models/`): `npm run fetch-model`
 - Test: `npm test` (vitest; offline; M2b tests need the model fetched and fail loudly without it)
 - Typecheck: `npm run typecheck` (tsc --noEmit)
-- Build: `npm run build` (esbuild → `dist/chatlink.js` library + `dist/cli.js`; `better-sqlite3` stays external)
-- Rebuild index: `node dist/cli.js rebuild --repo <clone> --me <name> --state <dir>` (from M2a)
+- Build: `npm run build` (scripts/build.mjs → `dist/server.js`, `dist/cli.js`, `dist/chatlink.js`, the SQLite `.wasm`, THIRD-PARTY-NOTICES.txt)
+- Pack the Claude Desktop extension: `npm run pack` → `dist/chatlink.mcpb` (needs the model fetched; runs the pinned `@anthropic-ai/mcpb` via npx)
+- Rebuild index: `node dist/cli.js rebuild --repo <clone> --me <name>` (from M2a)
+- Import an old chat: `node dist/cli.js import --repo <clone> --me <name> [--conversation <name>] <file>` (from M4; quit Claude Desktop first)
 - Run server (stdio): `node dist/server.js` with `CHATLINK_ME` and `CHATLINK_REPO` set (from M3)
 - Local two-person test space for Claude Desktop: `node scripts/dev-space.mjs <folder outside OneDrive>`; see docs/m3-desktop-test.md
 

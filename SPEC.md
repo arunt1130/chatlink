@@ -59,7 +59,7 @@ logs/krish/2026-11-12.jsonl        index.sqlite (keyword + vector search)
 
 MUST: the index, embeddings, and any other derived file are never committed. `.gitignore` allows only `logs/`, `space.json`, `.gitignore` and `.gitattributes`. `.gitattributes` forces LF line endings (`*.jsonl text eol=lf`, `space.json text eol=lf`) so logs are byte-identical on every OS.
 
-`space.json` lists members and display names. It is written once at setup and changes rarely.
+`space.json` marks the repo as a chatlink space and can list members and display names. First-run setup writes it with fixed contents (no members; the members are the folders under `logs/`), so two people setting up at once write identical files. It changes rarely.
 
 ## Event format
 
@@ -140,6 +140,7 @@ MCP tools are called at the model's discretion, so no tool can be guaranteed to 
 | `mark_status` | `target` (event id), `status`, `reason` | The new `status` event |
 | `add_note` | `text` | The new `note` event |
 | `get_item` | `id` | One item with its full text (added in M3: the "id for fetching more" below) |
+| `import_transcript` | `path`, optional `conversation`, `include_assistant` | Imports an older chat (see Importing an existing chat), only on the user's explicit request (added in M4) |
 
 Every returned item includes `id`, `author`, `ts`, `kind`, `tier`, and the verbatim `text` (truncated if long, with the id for fetching more).
 
@@ -172,14 +173,14 @@ Setup should take a few minutes for someone who already uses git.
 1. One person creates a private GitHub repo and adds the others as collaborators.
 2. Each person clones it to their machine.
 3. Each person installs the `.mcpb` in Claude Desktop. The install dialog asks for two settings: their name (their folder under `logs/`) and the path to their clone. MCPB bundles support user-supplied configuration ([MCPB repo](https://github.com/modelcontextprotocol/mcpb)).
-4. On first run, the server creates `logs/<name>/`, `.gitignore`, `.gitattributes`, and `space.json` if missing, then builds the index. It warns if the clone is inside a file-sync folder such as OneDrive, Dropbox, or iCloud Drive, because those can corrupt `.git`.
+4. On first run, the server creates `.gitignore`, `.gitattributes`, and `space.json` if missing (`logs/<name>/` appears with the first message), then builds the index. It warns if the clone is inside a file-sync folder such as OneDrive, Dropbox, or iCloud Drive, because those can corrupt `.git`.
 5. Each person creates a Claude Desktop Project and pastes the Behaviour rules template into its instructions.
 
 During development (before M4), register the server manually in Claude Desktop's config file instead of using the bundle.
 
 ## Importing an existing chat
 
-A one-off command imports an older conversation, such as Krish's weeks-long chat, so the shared memory starts with its history.
+A one-off command imports an older conversation, such as Krish's weeks-long chat, so the shared memory starts with its history. It is available both as `chatlink import` on the command line and as the `import_transcript` tool, because someone who installed only the `.mcpb` has no command line.
 
 - **Input:** a transcript as a text or JSON file, plus the author name.
 - **Processing:** split it into turns. The author's turns become `import` events with `role: human`. Claude's turns are either skipped or imported with `role: assistant` (configurable, default skip). Keep original timestamps if the transcript has them.
@@ -220,7 +221,7 @@ Build in this order. Each milestone ends with its tests passing and a commit. Te
 ## Open questions for the implementing session to raise
 
 - [x] Python or TypeScript, given bundle size and embedding-model options? **TypeScript** (see DECISIONS.md).
-- [x] Which local embedding model, and how big is the resulting bundle? **model2vec `potion-base-32M`** (MIT, 129 MB, 512-dim), run in pure JS (see DECISIONS.md). It dominates the bundle; the code is ~55 KB plus better-sqlite3.
+- [x] Which local embedding model, and how big is the resulting bundle? **model2vec `potion-base-32M`** (MIT, 129 MB, 512-dim), run in pure JS (see DECISIONS.md). It dominates the bundle: the `.mcpb` is 116.6 MB, of which the server (minified JS) and the SQLite WebAssembly build are about 2 MB (see DECISIONS.md, M4).
 - [x] Should Claude's replies be logged as `assistant_note` by default, or not at all? **Off by default.**
 - [x] How is `sync_turn` latency split between pull, search, and commit, and does pull need a cache window (skip pulling if pulled a few seconds ago)? **Measured in M3** (local bare remote, Windows): pull+ingest 0.5–1.1 s, commit 0.4 s, search ~2 ms, total 1.1–1.7 s. Almost all of it is git process start-up (~45 ms each, about ten per turn), not chatlink. `sync_turn` always pulls (MUST). `search`/`whats_new`/`mark_status` skip the pull if one succeeded in the last 15 s. Re-measure against real GitHub in M5 (see DECISIONS.md).
 

@@ -80,3 +80,17 @@ function isDir(p: string): boolean {
     return false;
   }
 }
+
+/** A warning when the clone is inside a file-sync folder: those tools can corrupt .git. */
+export function syncFolderWarning(repoPath: string): string | null {
+  // Split on both separators, so Windows and POSIX paths are judged the same on any OS.
+  const parts = repoPath.split(/[\\/]+/);
+  // Windows "OneDrive - Org", macOS "CloudStorage/OneDrive-Personal", "Dropbox (Personal)", iCloud, Google Drive.
+  const hit = parts.find((p) =>
+    /^(OneDrive([ -].*)?|Dropbox( \(.*\))?|iCloud ?Drive.*|iCloudDrive|Mobile Documents|CloudStorage|Google ?Drive.*|My Drive)$/i.test(p),
+  );
+  const m = hit ? [hit, hit] : null;
+  return m
+    ? `your clone is inside ${m[1]} (${repoPath}). File-sync tools can corrupt git folders: move the clone somewhere they don't sync, e.g. your home folder.`
+    : null;
+}

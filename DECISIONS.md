@@ -177,3 +177,49 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
 ### 2026-11-14 — M3 acceptance in Claude Desktop: passed
 - **Result:** Arun ran `docs/m3-desktop-test.md` on one Windows laptop: two server entries (`chatlink-arun`, `chatlink-krish`) pointed at two clones of a local bare repo. Krish said caching won't help. In Arun's chat, "Should we cache the query results…" got an answer that named Krish, gave the date and quoted his words. The optional checks also passed: the decision prompt and mark as closed, Krish seeing Arun's close, and off the record writing nothing. Claude used the right server's tools in each chat.
 - **Learned:** Claude Desktop keeps each server's tools separate, so two chatlink entries don't collide. There was no per-chat toggle to be found. Instead, one Project per person, whose instructions name that person's server ("use ONLY the chatlink-krish tools"), worked reliably. `docs/m3-desktop-test.md` is updated to match. `timing_ms` from real Desktop use wasn't captured; measure it in M5.
+
+### 2026-11-14 — M4 SQLite driver: node-sqlite3-wasm (supersedes "M2a SQLite driver: better-sqlite3")
+- **Decision:** The index uses `node-sqlite3-wasm` 0.8.61 (SQLite 3.54 compiled to WebAssembly, MIT; FTS5 included, persists to a normal file). `better-sqlite3` is removed. All driver access goes through `src/search/db.ts`, which mirrors the slice of the better-sqlite3 API the index used, so `sqliteIndex.ts` barely changed:
+  - statements are prepared once and cached;
+  - each statement is reset right after use, because the driver otherwise keeps a read open and the file locked;
+  - all statements are finalized on close.
+  Vectors are also held in memory after the first vector search. Copying blobs out of WASM per query was slow.
+- **Alternatives considered:** better-sqlite3 with per-platform/ABI prebuilds; Node's `node:sqlite` (no FTS5 in Node 22.13); sql.js (in-memory, no FTS5 by default).
+- **Reason:** Claude Desktop runs node bundles on its own runtime. Its Windows install has no `node.exe`, which points to Electron's built-in Node, whose ABI differs from system Node and changes with Desktop updates. A native `.node` file would break on install or after an update, and would need one bundle per OS. WASM has no ABI: one bundle works on Windows, macOS and Linux. Measured with the real model: search 22 ms at 1k events and 56 ms at 10k (better-sqlite3: 12 / 118 ms); ingest with embedding ~3k events/s. WAL isn't available, and that's fine: one process, and the data is derived.
+
+### 2026-11-14 — M4 packaging: one .mcpb with the model inside
+- **Decision:** `npm run pack` (`scripts/pack-mcpb.mjs`) builds a minified bundle with `scripts/build.mjs` and stages `manifest.json` (MCPB 0.3), `server/server.js`, `server/node-sqlite3-wasm.wasm`, `models/potion-base-32M/*`, README and THIRD-PARTY-NOTICES.txt. It validates the manifest, then runs `mcpb pack`. Result: 116.6 MB, almost all model. `user_config` asks for two things, `name` (string) and `repo` (directory), passed as `CHATLINK_ME` / `CHATLINK_REPO`. ESM output gets a `require`/`__dirname` banner for the WASM loader. Notices are generated from the esbuild metafile (every bundled npm package's license file: 9 packages, all MIT/ISC/BSD-3) plus the model and SQLite.
+- **Alternatives considered:** downloading the model on first run (smaller bundle); `@anthropic-ai/mcpb` as a devDependency.
+- **Reason:** SPEC NFR 4: the only runtime network traffic is git. A first-run download would add Hugging Face. The `mcpb` CLI runs pinned through `npx`, so its own dev-only dependencies (old zod 3, `tmp` via inquirer) don't land in the project's `npm ci` or audit. Packing is a maintainer step that already needs network. `tests/m4/bundle.test.ts` stages the bundle and runs it the way Desktop does (manifest substitutions, a foreign working directory) for a two-person hybrid-search exchange.
+
+### 2026-11-14 — M4 first-run setup, git identity, one server per clone, import
+- **Decision:**
+  - (1) **Setup** (`GitTransport.setup()`, run once per process before the first sync):
+    - It pulls first. Then, for each of `.gitignore`, `.gitattributes` and `space.json` that the repo doesn't track, it writes the file with fixed contents and commits it as "chatlink: space setup".
+    - The commit has its own guard: only those files, otherwise undone and refused.
+    - It never overwrites an existing file; one that differs from the template is a warning. Two people setting up an empty repo at once write identical files, and the rebase drops the duplicate commit (tested).
+    - It warns, through `sync.warnings`, when the clone has no upstream or the remote is unreachable. A brand-new empty remote isn't "unreachable": that's checked with `ls-remote`.
+    - The sync-folder warning (OneDrive, Dropbox, iCloud, Google Drive) is also surfaced in `sync.warnings`.
+    - This is the one SPEC-sanctioned write outside `logs/<me>/` (SPEC setup flow, step 4).
+  - (2) **Git identity:** if `user.name`/`user.email` aren't set (a fresh machine), chatlink's own commits pass `-c user.name=<me> -c user.email=<me>@chatlink.invalid`. The user's identity wins when set.
+  - (3) **One server per clone:** `.git/chatlink-server.lock` holds a pid, taken with `O_EXCL`. A new process waits up to 6 s for a live holder (Desktop restarting a server) and takes over a dead one's lock. Otherwise it refuses with a message saying what to do. The lock is in `.git`, so it holds across different state dirs. `chatlink import` and `chatlink rebuild` take it too. This closes the M3 known risk.
+  - (4) **Import:** `src/import/transcript.ts` reads a Claude.ai export (`conversations.json`; with several conversations, one is picked by name or uuid), a JSON array of turns, or text with `Human:`/`Assistant:` labels.
+    - Ids are ULIDs: the time part is the turn's original time (0 if unknown); the random part is a hash of (author, transcript key = conversation uuid or content hash, position, role, text).
+    - Ids already in my log or the index are skipped, so a re-run adds no lines and no commit.
+    - The author is always me, since I write only my own folder. Claude's turns are skipped by default (SPEC).
+    - It is exposed as the CLI command and as the `import_transcript` tool. SPEC.md is updated.
+  - (5) Version 0.4.0. `SERVER_VERSION` equals the package and manifest version (tested).
+- **Reason:** M4's bar is "a fresh machine … following only the README". A missing git identity, an empty remote, two people setting up at once, and someone with no Node all happen on day one.
+
+### 2026-11-14 — M4 fixes after spec review
+- **Decision:**
+  - (1) The server lock is now `.git/chatlink-server.pid`. As `*.lock` it was deleted by M1's lock cleanup after a timed-out pull, which happens on any offline turn. The takeover of a dead holder's lock re-reads the file right before deleting it, so it only removes the stale one. A tiny race remains; the loser's exclusive create then fails and it waits. The "already running" message names the file to delete after a crash, which covers Windows pid reuse. Tested: the lock survives a timed-out pull.
+  - (2) **One name per computer.** Each install needs its own clone *and its own name*. Two clones writing `logs/<name>/<day>.jsonl` would both append to the same file, so every `pull --rebase` would conflict, be aborted, and leave that machine stale forever. The README now says to use names like `arun` and `arun-laptop`, and so does the install dialog's hint. Per-device files under one person's name are a candidate for M5 feedback (SPEC unchanged: one writer per folder).
+  - (3) **Setup while offline:** if the pull fails and the remote isn't known to be empty, setup writes nothing (`complete: false`). The others may have set the space up already, and different files would clash on the next pull. The first attempt runs before the first sync; retries run only after a sync that reached the remote, so an offline turn doesn't pay a second pull timeout. Setup files are written with `wx` (never clobbered). A symlink (even dangling) or a folder with a space file's name is never written through: it's a warning instead. A *tracked* `.gitignore` that differs from the template gets a warning; chatlink still commits only its own log paths, so nothing derived can be shared either way.
+  - (4) **README for a fresh machine:** install git first (Windows: Git for Windows with Credential Manager; macOS: command line tools, then GitHub CLI `gh auth login` + `gh auth setup-git`) *before* cloning. Then check that `ls-remote` runs without a prompt, and restart Claude Desktop if git was installed while it was open. The `.mcpb` (about 120 MB) is shared as a file link.
+  - (5) **Import:** text transcripts recognise only `Human:`/`User:` and `Assistant:`/`Claude:` as speaker labels, so a line starting "Me:" or "AI:" inside a message stays in it. Line endings are normalized before the transcript key is hashed, so a CRLF re-save imports nothing new. Import events have `ts` = when they entered the shared memory and `original_ts` = when they were said, with the ULID's time part = `original_ts` (0 if unknown). Ordering and status ties use `ts` then `id`, so this only affects id sortability, and only for imports.
+  - (6) More sync folders are flagged: macOS `CloudStorage/…` (OneDrive, Google Drive), `Dropbox (Personal)`.
+- **Known, not fixed:**
+  - `import_transcript` reads whatever path Claude passes. The tool description limits it to explicit user requests, and only transcript-shaped files parse.
+  - bundle.test.ts runs system Node, not Claude Desktop's runtime. The real install on Krish's machine is M4's manual acceptance.
+- **Reason:** Spec-review findings for M4.
