@@ -11,8 +11,7 @@ const SERVER = path.join(ROOT, "dist", "server.js");
 describe("M3 the built server over stdio", { timeout: 120_000 }, () => {
   beforeAll(() => {
     // Build exactly what Claude Desktop runs (local esbuild, no network).
-    execFileSync(process.execPath, [path.join(ROOT, "node_modules", "esbuild", "bin", "esbuild"),
-      "server=src/server.ts", "--bundle", "--platform=node", "--target=node20", "--format=esm", "--outdir=dist", "--external:better-sqlite3", "--log-level=warning"], { cwd: ROOT });
+    execFileSync(process.execPath, [path.join(ROOT, "scripts", "build.mjs")], { cwd: ROOT });
   });
 
   it("starts, speaks MCP on stdout only, syncs a turn, and exits cleanly when stdin closes", async () => {

@@ -61,13 +61,13 @@ describe("M3 end to end over MCP, two users", { timeout: 120_000 }, () => {
     expect(kt.new_from_others.items).toContainEqual(expect.objectContaining({ kind: "status", tier: "confirmed", target: k.logged.id, marks: "closed" }));
   });
 
-  it("lists the five tools plus get_item, and the catch_me_up prompt runs whats_new", async () => {
+  it("lists the five SPEC tools plus get_item and import_transcript, and the catch_me_up prompt runs whats_new", async () => {
     const s = makeSpace();
     const krishApp = openApp(s, "krish");
     const krish = await connect(krishApp);
     const arun = await connect(openApp(s, "arun"));
     const tools = (await arun.listTools()).tools;
-    expect(tools.map((t) => t.name).sort()).toEqual(["add_note", "get_item", "mark_status", "search", "sync_turn", "whats_new"]);
+    expect(tools.map((t) => t.name).sort()).toEqual(["add_note", "get_item", "import_transcript", "mark_status", "search", "sync_turn", "whats_new"]);
     const st = tools.find((t) => t.name === "sync_turn")!;
     expect(st.description).toMatch(/START of EVERY reply, BEFORE answering/);
     expect(st.description).toMatch(/verbatim/);

@@ -1,6 +1,6 @@
 {
   "name": "chatlink",
-  "version": "0.0.0",
+  "version": "0.4.1",
   "private": true,
   "description": "Local MCP server that lets several people's Claude Desktop chats share one memory via a private git repo.",
   "type": "module",
@@ -10,11 +10,11 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "esbuild chatlink=src/index.ts cli=src/cli.ts server=src/server.ts --bundle --platform=node --target=node20 --format=esm --outdir=dist --external:better-sqlite3",
-    "fetch-model": "node scripts/fetch-model.mjs"
+    "build": "node scripts/build.mjs",
+    "fetch-model": "node scripts/fetch-model.mjs",
+    "pack": "node scripts/pack-mcpb.mjs"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "^9.6.0",
     "@types/node": "^22.20.5",
     "esbuild": "^0.28.2",
     "typescript": "^7.0.2",
@@ -22,7 +22,7 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.2",
-    "better-sqlite3": "^12.11.1",
+    "node-sqlite3-wasm": "^0.8.61",
     "zod": "^4.6.7"
   }
 }

@@ -1,7 +1,7 @@
 import { randomBytes } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync } from "node:fs";
 import path from "node:path";
-import Database from "better-sqlite3";
+import { Db } from "./db";
 import { type Event, type StatusEvent, type StatusValue, type Tier, tierOf } from "../events/schema";
 import { type EventStore, type IngestResult, canonicalJson } from "../events/store";
 import { isInsideOrEqual } from "../events/paths";
@@ -113,10 +113,11 @@ export type OpenOptions = {
 };
 
 type Row = { canon: string };
+type VecEntry = { ts_ms: number; id: string; author: string; vec: Float32Array };
 type Cand = { rowid: number; ts_ms: number; id: string; keyword: number; vector: number };
 
-const toBlob = (v: Float32Array) => Buffer.from(v.buffer, v.byteOffset, v.byteLength);
-const fromBlob = (b: Buffer) => new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
+const toBlob = (v: Float32Array) => new Uint8Array(v.buffer, v.byteOffset, v.byteLength);
+const fromBlob = (b: Uint8Array) => new Float32Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength));
 
 /** The text an event contributes to keyword search. */
 function bodyOf(e: Event): string | null {
@@ -132,11 +133,17 @@ function bodyOf(e: Event): string | null {
  */
 export class SqliteIndex implements EventStore {
   readonly file: string;
-  private db: Database.Database;
+  private db: Db;
 
   readonly embedder: Embedder | undefined;
+  /**
+   * All vectors, held in memory after the first vector search so a query is a
+   * pure-JS scan (copying blobs out of WebAssembly per query is slow). Kept in
+   * step on ingest; dropped (reloaded lazily) on bulk changes or a failed write.
+   */
+  private vecCache: Map<number, VecEntry> | null = null;
 
-  private constructor(file: string, db: Database.Database, embedder: Embedder | undefined) {
+  private constructor(file: string, db: Db, embedder: Embedder | undefined) {
     this.file = file;
     this.db = db;
     this.embedder = embedder;
@@ -187,14 +194,14 @@ export class SqliteIndex implements EventStore {
         .all() as { rowid: number; body: string }[];
       const put = this.db.prepare("INSERT OR REPLACE INTO vectors (rowid, vec) VALUES (?, ?)");
       for (const m of missing) put.run(m.rowid, toBlob(em.embed(m.body)));
+      this.vecCache = null;
       return missing.length;
     })();
   }
 
-  private static connect(file: string): Database.Database {
-    const db = new Database(file);
+  private static connect(file: string): Db {
+    const db = new Db(file);
     try {
-      db.pragma("journal_mode = WAL");
       db.pragma("synchronous = NORMAL"); // derived data: speed over durability
       const v = db.pragma("user_version", { simple: true }) as number;
       if (v !== INDEX_SCHEMA_VERSION) {
@@ -219,6 +226,7 @@ export class SqliteIndex implements EventStore {
   /** Empties the index (keeps the file). The next sync re-reads everything. */
   reset(): void {
     const source = this.getMeta("source");
+    this.vecCache = null;
     this.db.transaction(() => {
       this.db.exec(DROP);
       this.db.exec(SCHEMA);
@@ -245,17 +253,29 @@ export class SqliteIndex implements EventStore {
 
   /** Ingests and advances the cursor in one transaction, so a crash can't leave them out of step. */
   ingestAt(events: Iterable<Event>, cursor: string): IngestResult {
-    return this.db.transaction(() => {
-      const r = this.ingestRaw(events);
-      this.setMeta("cursor", cursor);
-      return r;
-    })();
+    return this.guarded(() =>
+      this.db.transaction(() => {
+        const r = this.ingestRaw(events);
+        this.setMeta("cursor", cursor);
+        return r;
+      })(),
+    );
+  }
+
+  /** A failed (rolled back) write may have touched the in-memory vectors: drop them. */
+  private guarded<T>(fn: () => T): T {
+    try {
+      return fn();
+    } catch (e) {
+      this.vecCache = null;
+      throw e;
+    }
   }
 
   // ---- EventStore -----------------------------------------------------------
 
   ingest(events: Iterable<Event>): IngestResult {
-    return this.db.transaction(() => this.ingestRaw(events))();
+    return this.guarded(() => this.db.transaction(() => this.ingestRaw(events))());
   }
 
   private ingestRaw(events: Iterable<Event>): IngestResult {
@@ -271,11 +291,17 @@ export class SqliteIndex implements EventStore {
     const putVec = this.db.prepare("INSERT OR REPLACE INTO vectors (rowid, vec) VALUES (?, ?)");
     const dropVec = this.db.prepare("DELETE FROM vectors WHERE rowid = ?");
     const em = this.embedder;
-    const embedRow = (id: string, body: string | null) => {
+    const embedRow = (row: { id: string; author: string; ts_ms: number; body: string | null }) => {
       if (!em) return;
-      const rowid = rowidOf.get(id) as number;
-      if (body === null) dropVec.run(rowid);
-      else putVec.run(rowid, toBlob(em.embed(body)));
+      const rowid = rowidOf.get(row.id) as number;
+      if (row.body === null) {
+        dropVec.run(rowid);
+        this.vecCache?.delete(rowid);
+      } else {
+        const vec = em.embed(row.body);
+        putVec.run(rowid, toBlob(vec));
+        this.vecCache?.set(rowid, { ts_ms: row.ts_ms, id: row.id, author: row.author, vec });
+      }
     };
     for (const e of events) {
       const canon = canonicalJson(e);
@@ -301,11 +327,11 @@ export class SqliteIndex implements EventStore {
         r.conflicts++;
         if (prev.canon <= canon) continue;
         update.run(row);
-        embedRow(row.id, row.body);
+        embedRow(row);
         continue;
       }
       insert.run(row);
-      embedRow(row.id, row.body);
+      embedRow(row);
       r.added++;
     }
     return r;
@@ -338,6 +364,17 @@ export class SqliteIndex implements EventStore {
   }
 
   // ---- search ---------------------------------------------------------------
+
+  /** All vectors with what the filters need, loaded once (see vecCache). */
+  private vectors(): Map<number, VecEntry> {
+    if (!this.vecCache) {
+      const rows = this.db
+        .prepare("SELECT e.rowid AS rowid, e.ts_ms AS ts_ms, e.id AS id, e.author AS author, v.vec AS vec FROM vectors v JOIN events e ON e.rowid = v.rowid")
+        .all() as { rowid: number; ts_ms: number; id: string; author: string; vec: Uint8Array }[];
+      this.vecCache = new Map(rows.map((r) => [r.rowid, { ts_ms: r.ts_ms, id: r.id, author: r.author, vec: fromBlob(r.vec) }]));
+    }
+    return this.vecCache;
+  }
 
   /**
    * For each of `rowids`: the idf-weighted share of `terms` it contains, in
@@ -414,16 +451,15 @@ export class SqliteIndex implements EventStore {
     const em = this.embedder;
     const qv = em ? em.embed(query) : null;
     if (em && qv && qv.some((x) => x !== 0)) {
-      const { fts: _f, pool: _p, ...vparams } = params;
-      const rows = this.db
-        .prepare(`SELECT e.rowid AS rowid, e.ts_ms AS ts_ms, e.id AS id, v.vec AS vec FROM vectors v JOIN events e ON e.rowid = v.rowid WHERE 1${filter}`)
-        .all(vparams) as { rowid: number; ts_ms: number; id: string; vec: Buffer }[];
-      const sims: { r: (typeof rows)[number]; sim: number }[] = [];
-      for (const r of rows) {
-        const v = fromBlob(r.vec);
-        if (v.length !== qv.length) continue;
-        const sim = Math.min(1, dot(qv, v));
-        if (sim >= cfg.minVectorSim) sims.push({ r, sim });
+      const authorF = params.author as string | undefined;
+      const sinceF = params.since as number | undefined;
+      const sims: { r: { rowid: number; ts_ms: number; id: string }; sim: number }[] = [];
+      for (const [rowid, v] of this.vectors()) {
+        if (authorF !== undefined && v.author !== authorF) continue;
+        if (sinceF !== undefined && v.ts_ms < sinceF) continue;
+        if (v.vec.length !== qv.length) continue;
+        const sim = Math.min(1, dot(qv, v.vec));
+        if (sim >= cfg.minVectorSim) sims.push({ r: { rowid, ts_ms: v.ts_ms, id: v.id }, sim });
       }
       sims.sort((a, b) => b.sim - a.sim || b.r.ts_ms - a.r.ts_ms || (a.r.id < b.r.id ? 1 : -1));
       for (const { r, sim } of sims.slice(0, pool)) {
@@ -548,7 +584,8 @@ function clampLimit(n: number | undefined): number {
 
 function isCorrupt(e: unknown): boolean {
   const code = (e as { code?: string }).code ?? "";
-  return code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB";
+  const msg = (e as { message?: string }).message ?? "";
+  return code.startsWith("SQLITE_CORRUPT") || code === "SQLITE_NOTADB" || /not a database|malformed|corrupt/i.test(msg);
 }
 
 /** Extensions an index file may have. None of them can be a shared log (`.jsonl`) or `space.json`. */

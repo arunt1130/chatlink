@@ -1,4 +1,4 @@
-import { existsSync, readdirSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { type Event, AUTHOR_RE } from "../events/schema";
 import { LOG_FILE_RE, WriteRefusedError, assertAuthor, isInsideOrEqual } from "../events/paths";
@@ -6,7 +6,8 @@ import { type Skipped, readAllLogs, readLogFile } from "../events/reader";
 import { appendEvents } from "../events/writer";
 import { type GitRunner, type ProcResult, runGit } from "./gitcli";
 import { type PersistedState, loadState, saveState } from "./state";
-import type { AppendMineResult, FetchResult, SyncState, Transport } from "./types";
+import { SHARED_FILES } from "./shared";
+import type { AppendMineResult, FetchResult, SetupReport, SyncState, Transport } from "./types";
 
 export type GitTransportConfig = {
   /** My author slug; I write only logs/<me>/. */
@@ -56,6 +57,20 @@ class Mutex {
     this.tail = r.catch(() => {});
     return r;
   }
+}
+
+/**
+ * chatlink runs git with prompts off, so a sign-in it can't do silently fails.
+ * The usual cause is Git Credential Manager wanting to ask something (which of
+ * several GitHub accounts, or a first sign-in). Say how to fix it once.
+ */
+export function credentialHint(msg: string, repo: string): string | null {
+  if (!/interactiv|cannot prompt|could not read (username|password)|terminal prompts disabled|authentication failed|invalid username or password|permission to .* denied|\b403\b/i.test(msg)) return null;
+  return (
+    `git couldn't sign in to GitHub without asking. If you have more than one GitHub account, pick one for this folder: ` +
+    `git -C "${repo}" config credential.https://github.com.username YOUR_GITHUB_USERNAME . ` +
+    `Otherwise run git -C "${repo}" ls-remote origin once in a terminal and finish the sign-in`
+  );
 }
 
 const describe = (r: ProcResult) => (r.timedOut ? "timed out" : (r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`).split("\n")[0]!);
@@ -249,7 +264,7 @@ export class GitTransport implements Transport {
     const d = await this.git(["diff", "--cached", "--quiet", "--", this.mySpec]);
     if (d.code === 0) return false;
     if (d.code !== 1) throw new GitError(`diff failed: ${describe(d)}`, d);
-    await this.ok([...COMMIT_FLAGS, "-m", message, "--", this.mySpec]);
+    await this.ok([...(await this.identity()), ...COMMIT_FLAGS, "-m", message, "--", this.mySpec]);
 
     const names = (await this.ok(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"])).stdout
       .split("\0")
@@ -263,6 +278,126 @@ export class GitTransport implements Transport {
       throw new WriteRefusedError(`refusing to commit outside ${prefix}: ${outside.join(", ")}`);
     }
     return true;
+  }
+
+  /**
+   * `-c user.name/-c user.email` for chatlink's commits when the user's git has
+   * no identity (common on a fresh machine: git refuses to commit without one).
+   * The user's own identity always wins when it is set.
+   */
+  private identityCache: string[] | null = null;
+  private async identity(): Promise<string[]> {
+    if (this.identityCache) return this.identityCache;
+    const name = (await this.git(["config", "user.name"])).stdout.trim();
+    const email = (await this.git(["config", "user.email"])).stdout.trim();
+    const flags: string[] = [];
+    if (!name) flags.push("-c", `user.name=${this.me}`);
+    if (!email) flags.push("-c", `user.email=${this.me}@chatlink.invalid`);
+    this.identityCache = flags;
+    return flags;
+  }
+
+  // ---- first-run setup ----------------------------------------------------
+
+  /**
+   * First run: makes sure the shared repo has its own config files
+   * (.gitignore, .gitattributes, space.json). Pulls first, so only a truly new
+   * space gets them. Writes only files that are absent, with fixed contents,
+   * so two people setting up at once produce identical commits that rebase
+   * cleanly. Never overwrites an existing file: one that differs from the
+   * template is reported instead. Commits only those files, then pushes in the
+   * background.
+   */
+  async setup(): Promise<SetupReport> {
+    const r = await this.lock.run(async () => {
+      const report: SetupReport = { created: [], warnings: [], complete: true };
+      const pulled = await this.pullLocked();
+      // A clone of a brand-new (empty) repo has upstream config but no remote branch yet: that's fine.
+      let hasUpstream = true;
+      try {
+        await this.upstream();
+      } catch {
+        hasUpstream = false;
+      }
+      if (!hasUpstream) report.warnings.push("this clone has no upstream branch (was it made with git clone?): your messages stay local until it has one");
+      else if (!pulled && !(await this.remoteIsEmpty())) {
+        // Offline (or unreachable): the others may already have set the space up.
+        // Creating files now could clash with theirs on the next pull, so wait.
+        report.warnings.push("could not reach the shared repo; first-run setup will finish once it can");
+        report.complete = false;
+        return report;
+      }
+
+      const tracked = new Set((await this.ok(["ls-files", "-z", "--", ...SHARED_FILES.map((f) => f.path)])).stdout.split("\0").filter(Boolean));
+      const toAdd: string[] = [];
+      for (const f of SHARED_FILES) {
+        const abs = path.join(this.root, f.path);
+        if (tracked.has(f.path)) {
+          // Shared already. Only the .gitignore matters for the "derived files never shared" rule: say if it differs.
+          if (f.path === ".gitignore") {
+            try {
+              if (readFileSync(abs, "utf8").replace(/\r\n/g, "\n") !== f.content) {
+                report.warnings.push(".gitignore in the shared repo differs from chatlink's template (it should share only logs/ and space.json); chatlink still commits only your log files");
+              }
+            } catch {
+              /* unreadable: nothing to compare */
+            }
+          }
+          continue;
+        }
+        let st: ReturnType<typeof lstatSync> | undefined;
+        try {
+          st = lstatSync(abs);
+        } catch {
+          /* absent */
+        }
+        if (st && !st.isFile()) {
+          // A symlink (even a dangling one) or a folder: never write through it.
+          report.warnings.push(`${f.path} exists but isn't a regular file; left it alone`);
+          continue;
+        }
+        if (st) {
+          const cur = readFileSync(abs, "utf8").replace(/\r\n/g, "\n");
+          if (cur !== f.content) {
+            report.warnings.push(`${f.path} exists but isn't shared and differs from chatlink's template; left it alone`);
+            continue;
+          }
+        } else {
+          writeFileSync(abs, f.content, { flag: "wx" }); // never clobber: fails if it appeared meanwhile
+          report.created.push(f.path);
+        }
+        toAdd.push(f.path);
+      }
+      if (toAdd.length) {
+        await this.ok(["add", "--", ...toAdd]);
+        const d = await this.git(["diff", "--cached", "--quiet", "--", ...toAdd]);
+        if (d.code === 1) {
+          await this.ok([...(await this.identity()), ...COMMIT_FLAGS, "-m", "chatlink: space setup", "--", ...toAdd]);
+          const names = (await this.ok(["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", "HEAD"])).stdout.split("\0").filter(Boolean);
+          const outside = names.filter((n) => !toAdd.includes(n));
+          if (outside.length) {
+            const parent = await this.git(["rev-parse", "--verify", "-q", "HEAD~1"]);
+            if (parent.code === 0) await this.git(["reset", "-q", "--soft", "HEAD~1"]);
+            else await this.git(["update-ref", "-d", "HEAD"]);
+            throw new WriteRefusedError(`setup commit would include other files: ${outside.join(", ")}`);
+          }
+        }
+      }
+      return report;
+    });
+    if (r.created.length) void this.schedulePush();
+    return r;
+  }
+
+  /** True when the remote answers but has no branches yet (a brand-new repo): a failed pull there isn't "offline". */
+  private async remoteIsEmpty(): Promise<boolean> {
+    try {
+      const { remote } = await this.upstream();
+      const r = await this.git(["ls-remote", "--heads", remote], this.cfg.pullTimeoutMs);
+      return r.code === 0 && r.stdout.trim() === "";
+    } catch {
+      return false;
+    }
   }
 
   // ---- push ---------------------------------------------------------------
@@ -305,12 +440,18 @@ export class GitTransport implements Transport {
         this.save();
         return;
       }
-      this.recordError(`push ${describe(r)} (attempt ${attempt}/${this.cfg.pushAttempts})`);
+      const pushErr = `push ${describe(r)} (attempt ${attempt}/${this.cfg.pushAttempts})`;
+      this.recordError(pushErr);
       if (attempt === this.cfg.pushAttempts) return;
       // Likely a non-fast-forward: someone pushed first. Pull, then retry.
       await sleep(this.cfg.backoffMs * attempt + Math.random() * this.cfg.backoffMs);
       const pulled = await this.lock.run(() => this.pullLocked());
-      if (!pulled) return; // offline: commits stay queued for the next turn
+      if (!pulled) {
+        // Offline, or a brand-new empty remote (nothing to pull yet): commits stay
+        // queued. Keep the push error visible; it is usually the real problem.
+        this.recordError(`${pushErr}; the pull before retrying failed too: ${this.state.lastError ?? "unknown"}`);
+        return;
+      }
     }
   }
 
@@ -371,7 +512,8 @@ export class GitTransport implements Transport {
   }
 
   private recordError(msg: string): void {
-    this.state.lastError = msg;
+    const hint = credentialHint(msg, this.root);
+    this.state.lastError = hint && !msg.includes(hint) ? `${msg}. ${hint}` : msg;
     this.save();
   }
 

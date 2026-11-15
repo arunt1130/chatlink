@@ -1,4 +1,4 @@
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync } from "node:fs";
 import path from "node:path";
 import type { ChatlinkConfig } from "../config";
 import { Model2Vec } from "../embed/model2vec";
@@ -8,7 +8,12 @@ import { type Item, type SearchHit, SqliteIndex } from "../search/sqliteIndex";
 import { syncIndex } from "../search/sync";
 import { GitTransport } from "../transport/git";
 import type { Transport } from "../transport/types";
+import { syncFolderWarning } from "../config";
+import { readLogFile } from "../events/reader";
+import { logDirFor } from "../events/paths";
+import { ImportError, importEvents, parseTranscript } from "../import/transcript";
 import { ReadCursorStore } from "./cursor";
+import { type ServerLock, acquireServerLock } from "./lock";
 import { type PossibleDecision, detectDecision } from "./decisions";
 
 export const LIMITS = Object.freeze({
@@ -34,6 +39,8 @@ export type SyncReport = {
   unpushed_commits: number;
   last_error: string | null;
   search_mode: "hybrid" | "keyword-only";
+  /** Setup problems the user should hear about once (e.g. the clone is in OneDrive). Omitted when none. */
+  warnings?: string[];
 };
 
 export type Digest = { items: Item[]; more: boolean };
@@ -71,6 +78,7 @@ export class Chatlink {
   readonly me: string;
   private readonly lock = new Mutex();
   private lastSyncAt = 0;
+  private setupDone = false;
   private readonly cursor: ReadCursorStore;
 
   private constructor(
@@ -80,13 +88,34 @@ export class Chatlink {
     readonly embedder: Embedder | undefined,
     readonly warnings: string[],
     private readonly now: () => number,
+    private readonly serverLock: ServerLock | null,
   ) {
     this.me = cfg.me;
     this.cursor = new ReadCursorStore(cfg.stateDir);
   }
 
-  static open(cfg: ChatlinkConfig, deps: { transport?: Transport; embedder?: Embedder | null; now?: () => number } = {}): Chatlink {
+  static open(
+    cfg: ChatlinkConfig,
+    deps: { transport?: Transport; embedder?: Embedder | null; now?: () => number; lock?: boolean; lockWaitMs?: number } = {},
+  ): Chatlink {
+    // First, before touching anything: one chatlink process per clone.
+    const serverLock = deps.lock === false ? null : acquireServerLock(cfg.repoPath, { waitMs: deps.lockWaitMs, what: "another chatlink server" });
+    try {
+      return Chatlink.openLocked(cfg, deps, serverLock);
+    } catch (e) {
+      serverLock?.release();
+      throw e;
+    }
+  }
+
+  private static openLocked(
+    cfg: ChatlinkConfig,
+    deps: { transport?: Transport; embedder?: Embedder | null; now?: () => number },
+    serverLock: ServerLock | null,
+  ): Chatlink {
     const warnings: string[] = [];
+    const sf = syncFolderWarning(cfg.repoPath);
+    if (sf) warnings.push(sf);
     let embedder: Embedder | undefined;
     if (deps.embedder !== undefined) embedder = deps.embedder ?? undefined;
     else if (cfg.modelDir) {
@@ -102,7 +131,7 @@ export class Chatlink {
       deps.transport ??
       new GitTransport({ me: cfg.me, repoPath: cfg.repoPath, stateDir: cfg.stateDir, env: cfg.gitEnv, pullTimeoutMs: cfg.pullTimeoutMs });
     const index = SqliteIndex.open(cfg.indexFile, { source: cfg.repoPath, embedder });
-    return new Chatlink(cfg, transport, index, embedder, warnings, deps.now ?? Date.now);
+    return new Chatlink(cfg, transport, index, embedder, warnings, deps.now ?? Date.now, serverLock);
   }
 
   // ---- tools -------------------------------------------------------------------
@@ -188,6 +217,53 @@ export class Chatlink {
     });
   }
 
+  /**
+   * Imports an older chat from a transcript file (SPEC "Importing an existing
+   * chat"). My turns become `import` events, verbatim; Claude's turns are
+   * skipped unless includeAssistant. Safe to re-run: ids come from the
+   * transcript and turn positions, and ids already in my log are skipped.
+   */
+  importTranscript(args: { path: string; conversation?: string; includeAssistant?: boolean }): Promise<{
+    title: string | null;
+    turns: number;
+    imported: number;
+    already_imported: number;
+    skipped_assistant_turns: number;
+    sync: SyncReport;
+  }> {
+    return this.lock.run(async () => {
+      let content: string;
+      try {
+        content = readFileSync(args.path, "utf8");
+      } catch (e) {
+        throw new ImportError(`can't read ${args.path}: ${(e as NodeJS.ErrnoException).code ?? (e as Error).message}`);
+      }
+      const t = parseTranscript(content, { conversation: args.conversation });
+      const events = importEvents(this.me, t, { includeAssistant: args.includeAssistant, now: this.now() });
+      await this.syncIfOld();
+      const mine = new Set<string>();
+      const dir = logDirFor(this.cfg.repoPath, this.me);
+      if (existsSync(dir)) {
+        for (const f of readdirSync(dir)) {
+          if (f.endsWith(".jsonl")) for (const e of readLogFile(`${dir}/${f}`, this.me).events) mine.add(e.id);
+        }
+      }
+      const fresh = events.filter((e) => !mine.has(e.id) && !this.index.has(e.id));
+      if (fresh.length) {
+        await this.transport.appendMine(fresh); // one commit for the whole import
+        this.index.ingest(fresh);
+      }
+      return {
+        title: t.title,
+        turns: t.turns.length,
+        imported: fresh.length,
+        already_imported: events.length - fresh.length,
+        skipped_assistant_turns: args.includeAssistant ? 0 : t.turns.filter((x) => x.role === "assistant").length,
+        sync: await this.report(),
+      };
+    });
+  }
+
   /** The full text of one item (other tools cut long texts). */
   getItem(args: { id: string }): Promise<{ item: Item | null }> {
     return this.lock.run(async () => ({ item: this.index.item(args.id, LIMITS.fullChars) ?? null }));
@@ -203,14 +279,49 @@ export class Chatlink {
     await this.lock.run(async () => {
       await Promise.race([this.transport.whenIdle(), new Promise((r) => setTimeout(r, LIMITS.closeWaitMs))]);
       this.index.close();
+      this.serverLock?.release();
     });
   }
 
   // ---- internals ----------------------------------------------------------------
 
   private async syncLocked(): Promise<void> {
+    // First run: the shared repo's own files, before the first sync. If that
+    // can't finish (offline), retry only after a sync that reached the remote,
+    // so an offline turn doesn't pay for a second pull timeout.
+    if (!this.setupTried) await this.runSetup();
     const r = await syncIndex(this.index, this.transport);
-    if (!r.sync.stale) this.lastSyncAt = this.now();
+    if (!r.sync.stale) {
+      this.lastSyncAt = this.now();
+      if (!this.setupDone) await this.runSetup();
+    }
+  }
+
+  private setupTried = false;
+
+  private async runSetup(): Promise<void> {
+    this.setupTried = true;
+    if (!this.transport.setup) {
+      this.setupDone = true;
+      return;
+    }
+    const note = (w: string) => {
+      if (!this.warnings.includes(w)) this.warnings.push(w); // each warning once
+    };
+    try {
+      const s = await this.transport.setup();
+      s.warnings.forEach(note);
+      if (s.complete) {
+        this.setupDone = true;
+        this.dropWarning("first-run setup");
+      }
+    } catch (e) {
+      note(`first-run setup failed (will retry): ${(e as Error).message}`);
+    }
+  }
+
+  private dropWarning(fragment: string): void {
+    for (let i = this.warnings.length - 1; i >= 0; i--) if (this.warnings[i]!.includes(fragment)) this.warnings.splice(i, 1);
   }
 
   private async syncIfOld(): Promise<void> {
@@ -234,6 +345,7 @@ export class Chatlink {
       unpushed_commits: s.unpushed,
       last_error: s.lastError,
       search_mode: this.embedder ? "hybrid" : "keyword-only",
+      ...(this.warnings.length ? { warnings: [...this.warnings] } : {}),
     };
   }
 }

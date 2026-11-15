@@ -6,7 +6,7 @@ import { ConfigError, loadConfig } from "./config";
 import { STATUS_VALUES } from "./events/schema";
 
 export const SERVER_NAME = "chatlink";
-export const SERVER_VERSION = "0.3.0";
+export const SERVER_VERSION = "0.4.1";
 
 /** Tool descriptions are the main lever for reliable behaviour (see SPEC "Behaviour rules"). */
 export const DESCRIPTIONS = {
@@ -22,6 +22,8 @@ export const DESCRIPTIONS = {
     "Mark an item (by its event id) as decided, closed, reopened or superseded, with a short reason. Only when the user explicitly confirms. Creates a 'confirmed' status event attributed to the user.",
   add_note: "Add something to the shared memory because the user explicitly asked you to remember/share it. Stored verbatim as a 'confirmed' note by the user.",
   get_item: "Fetch one item's full text by event id (other tools cut long texts and say truncated: true).",
+  import_transcript:
+    "Import an older chat into the shared memory, verbatim, ONLY when the user explicitly asks and gives the file path. Accepts a Claude.ai data export (conversations.json; pass conversation = its name or uuid when the export has several), a JSON array of turns, or plain text with 'Human:'/'Assistant:' labels. The user's turns become 'imported' items; Claude's turns are skipped unless include_assistant is true. Safe to re-run: nothing is imported twice.",
 } as const;
 
 const json = (x: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(x, null, 1) }] });
@@ -92,6 +94,20 @@ export function createServer(app: Chatlink): McpServer {
     "get_item",
     { title: "Get one item's full text", description: DESCRIPTIONS.get_item, inputSchema: { id: z.string() }, annotations: { readOnlyHint: true } },
     async (a) => json(await app.getItem(a)),
+  );
+
+  server.registerTool(
+    "import_transcript",
+    {
+      title: "Import an older chat",
+      description: DESCRIPTIONS.import_transcript,
+      inputSchema: {
+        path: z.string().describe("Full path to the transcript file on this computer."),
+        conversation: z.string().optional().describe("For a Claude.ai export with many conversations: its name (or part of it) or uuid."),
+        include_assistant: z.boolean().optional().describe("Also import Claude's replies (as role assistant). Default false."),
+      },
+    },
+    async (a) => json(await app.importTranscript({ path: a.path, conversation: a.conversation, includeAssistant: a.include_assistant })),
   );
 
   // User-triggered, so the digest is one click away even when Claude forgets to sync.

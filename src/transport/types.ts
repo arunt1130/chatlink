@@ -25,6 +25,9 @@ export type FetchResult = {
 
 export type AppendMineResult = { written: number; committed: boolean };
 
+/** What first-run setup did: shared config files it created, and anything the user should know. */
+export type SetupReport = { created: string[]; warnings: string[]; /** false when setup must be retried (e.g. offline) */ complete: boolean };
+
 /**
  * The transport boundary. Git implements it now; a Drive transport can later.
  * "Append my events" and "fetch everyone's new events".
@@ -35,6 +38,8 @@ export interface Transport {
   /** Brings in everyone's new events, falling back to local data when offline. */
   fetchNew(since?: string): Promise<FetchResult>;
   syncState(): Promise<SyncState>;
+  /** First run: creates the shared space's own files if missing. Optional for other transports. */
+  setup?(): Promise<SetupReport>;
   /** Resolves when no background delivery is running. */
   whenIdle(): Promise<void>;
 }
