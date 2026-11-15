@@ -231,3 +231,7 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - (2) `credentialHint()` recognises credential-prompt failures (GCM "cannot prompt", "could not read Username", 403/denied) and appends a one-line fix to `lastError`: pick the account for this folder with `git config credential.https://github.com.username <name>`, or run `ls-remote` once to sign in.
   - (3) The README tells people with several GitHub accounts to set that once, after cloning.
 - **Reason:** A fresh setup has no other way to find out why its messages never arrive.
+
+### 2026-11-14 — M4 acceptance on two computers: passed
+- **Result:** Krish set up chatlink on his own computer from the v0.4.1 release, following the README's steps (driven by a Claude Code prompt built from them): git and GitHub sign-in, cloning `our-chatlink`, installing `chatlink.mcpb`, and the Project rules. His message "Caching won't help here: every query has a unique timestamp in it." went through `sync_turn` and reached the shared repo, and the exchange with Arun's laptop worked.
+- **Learned:** The one real-install problem (several GitHub accounts, so the credential prompt failed silently in the background) was found on Arun's machine and fixed in 0.4.1 before Krish installed. `timing_ms` from real use still wasn't captured; measure it in M5.
