@@ -92,7 +92,7 @@ describe("M4 first-run setup", { timeout: 90_000 }, () => {
 
   it("flags clones inside file-sync folders", () => {
     expect(syncFolderWarning("C:\\Users\\a\\OneDrive\\Desktop\\space")).toMatch(/OneDrive/);
-    expect(syncFolderWarning("C:\\Users\\a\\OneDrive - McMaster University\\space")).toMatch(/OneDrive - McMaster/);
+    expect(syncFolderWarning("C:\\Users\\a\\OneDrive - Contoso Ltd\\space")).toMatch(/OneDrive - Contoso/);
     expect(syncFolderWarning("/Users/a/Library/Mobile Documents/com~apple~CloudDocs/space")).toMatch(/Mobile Documents/);
     expect(syncFolderWarning("/Users/a/Dropbox/space")).toMatch(/Dropbox/);
     expect(syncFolderWarning("C:\\Users\\a\\chatlink-space")).toBeNull();

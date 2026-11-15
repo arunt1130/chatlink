@@ -29,7 +29,7 @@ Open Claude Desktop → Settings → Developer → Edit Config (`%APPDATA%\Claud
 ```json
 "chatlink-krish": {
   "command": "node",
-  "args": ["C:\\Users\\ArunT\\OneDrive\\Desktop\\Claude2Claude MCP\\dist\\server.js"],
+  "args": ["C:\\path\\to\\chatlink\\dist\\server.js"],
   "env": { "CHATLINK_ME": "krish", "CHATLINK_REPO": "C:\\chatlink-test\\krish" }
 }
 ```

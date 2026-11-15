@@ -65,7 +65,7 @@ If it asks for anything, finish the sign-in from step 2 and try again.
 
 ## 4. Everyone: install the extension
 
-1. Get **`chatlink.mcpb`** (about 120 MB). Whoever set this up sends it to you, for example with a Google Drive or OneDrive share link.
+1. Download **`chatlink.mcpb`** (about 120 MB) from the latest release at [github.com/arunt1130/chatlink/releases](https://github.com/arunt1130/chatlink/releases) (under *Assets*).
 2. Double-click it, or in Claude Desktop go to **Settings → Extensions** and drag the file in (or use *Install extension…*).
 3. Claude Desktop asks for two things:
    - **Your name**: lowercase, e.g. `arun`. It's your folder in the shared repo. Each person, and each computer, needs its own name (see "Good to know").
