@@ -223,3 +223,11 @@ Significant implementation choices, newest last. SPEC.md MUST lines are fixed an
   - `import_transcript` reads whatever path Claude passes. The tool description limits it to explicit user requests, and only transcript-shaped files parse.
   - bundle.test.ts runs system Node, not Claude Desktop's runtime. The real install on Krish's machine is M4's manual acceptance.
 - **Reason:** Spec-review findings for M4.
+
+### 2026-11-15 — 0.4.1: sign-in failures are reported, not hidden
+- **Found in the first real install:** Arun has two GitHub accounts. Git Credential Manager wanted to ask which one to use. chatlink runs git with `GCM_INTERACTIVE=never`, so the push failed at once. The retry loop then pulled, and on a brand-new empty repo that pull fails too ("no such ref"). The pull error overwrote the push error, so Claude reported a pull problem and the real cause was invisible. Nothing was lost: the commits stayed queued.
+- **Decision:**
+  - (1) When the pull before a push retry fails, `lastError` keeps the push error and adds the pull error after it.
+  - (2) `credentialHint()` recognises credential-prompt failures (GCM "cannot prompt", "could not read Username", 403/denied) and appends a one-line fix to `lastError`: pick the account for this folder with `git config credential.https://github.com.username <name>`, or run `ls-remote` once to sign in.
+  - (3) The README tells people with several GitHub accounts to set that once, after cloning.
+- **Reason:** A fresh setup has no other way to find out why its messages never arrive.

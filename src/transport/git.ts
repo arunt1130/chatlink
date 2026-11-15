@@ -59,6 +59,20 @@ class Mutex {
   }
 }
 
+/**
+ * chatlink runs git with prompts off, so a sign-in it can't do silently fails.
+ * The usual cause is Git Credential Manager wanting to ask something (which of
+ * several GitHub accounts, or a first sign-in). Say how to fix it once.
+ */
+export function credentialHint(msg: string, repo: string): string | null {
+  if (!/interactiv|cannot prompt|could not read (username|password)|terminal prompts disabled|authentication failed|invalid username or password|permission to .* denied|\b403\b/i.test(msg)) return null;
+  return (
+    `git couldn't sign in to GitHub without asking. If you have more than one GitHub account, pick one for this folder: ` +
+    `git -C "${repo}" config credential.https://github.com.username YOUR_GITHUB_USERNAME . ` +
+    `Otherwise run git -C "${repo}" ls-remote origin once in a terminal and finish the sign-in`
+  );
+}
+
 const describe = (r: ProcResult) => (r.timedOut ? "timed out" : (r.stderr.trim() || r.stdout.trim() || `exit ${r.code}`).split("\n")[0]!);
 const sleep = (ms: number) => new Promise((res) => setTimeout(res, ms));
 
@@ -426,12 +440,18 @@ export class GitTransport implements Transport {
         this.save();
         return;
       }
-      this.recordError(`push ${describe(r)} (attempt ${attempt}/${this.cfg.pushAttempts})`);
+      const pushErr = `push ${describe(r)} (attempt ${attempt}/${this.cfg.pushAttempts})`;
+      this.recordError(pushErr);
       if (attempt === this.cfg.pushAttempts) return;
       // Likely a non-fast-forward: someone pushed first. Pull, then retry.
       await sleep(this.cfg.backoffMs * attempt + Math.random() * this.cfg.backoffMs);
       const pulled = await this.lock.run(() => this.pullLocked());
-      if (!pulled) return; // offline: commits stay queued for the next turn
+      if (!pulled) {
+        // Offline, or a brand-new empty remote (nothing to pull yet): commits stay
+        // queued. Keep the push error visible; it is usually the real problem.
+        this.recordError(`${pushErr}; the pull before retrying failed too: ${this.state.lastError ?? "unknown"}`);
+        return;
+      }
     }
   }
 
@@ -492,7 +512,8 @@ export class GitTransport implements Transport {
   }
 
   private recordError(msg: string): void {
-    this.state.lastError = msg;
+    const hint = credentialHint(msg, this.root);
+    this.state.lastError = hint && !msg.includes(hint) ? `${msg}. ${hint}` : msg;
     this.save();
   }
 

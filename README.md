@@ -63,6 +63,12 @@ git -C "$HOME/chatlink-space" ls-remote origin
 
 If it asks for anything, finish the sign-in from step 2 and try again.
 
+**Have more than one GitHub account** (e.g. school and personal)? Then git asks *which* account to use, and chatlink can't answer that in the background. Tell git which one this folder uses, with your own GitHub username:
+
+```bash
+git -C "$HOME/chatlink-space" config credential.https://github.com.username YOUR_GITHUB_USERNAME
+```
+
 ## 4. Everyone: install the extension
 
 1. Download **`chatlink.mcpb`** (about 120 MB) from the latest release at [github.com/arunt1130/chatlink/releases](https://github.com/arunt1130/chatlink/releases) (under *Assets*).

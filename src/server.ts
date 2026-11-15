@@ -6,7 +6,7 @@ import { ConfigError, loadConfig } from "./config";
 import { STATUS_VALUES } from "./events/schema";
 
 export const SERVER_NAME = "chatlink";
-export const SERVER_VERSION = "0.4.0";
+export const SERVER_VERSION = "0.4.1";
 
 /** Tool descriptions are the main lever for reliable behaviour (see SPEC "Behaviour rules"). */
 export const DESCRIPTIONS = {
